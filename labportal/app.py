@@ -490,7 +490,7 @@ def cluster_create():
         )
         conn.commit()
         conn.close()
-        flash(f"Cluster '{cluster_name}' deployment started (OCP {ocp_version}). Check back for progress.", "success")
+        flash(f"Cluster '{cluster_name}' deployment started (OCP {ocp_version}). You will be notified via email upon successful installation.", "success")
     except Exception as e:
         flash(f"Failed to start deployment: {e}", "danger")
 
@@ -509,6 +509,18 @@ def cluster_delete():
     if cluster_name not in clusters:
         flash(f"Cluster '{cluster_name}' not found.", "warning")
         return redirect(url_for("user_dashboard"))
+
+    # Non-admin users can only delete clusters they created
+    if not session.get("admin"):
+        conn = get_db()
+        dep = conn.execute(
+            "SELECT started_by FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            (cluster_name,)
+        ).fetchone()
+        conn.close()
+        if dep and dep["started_by"] != session.get("user_email"):
+            flash("You can only delete clusters you created.", "danger")
+            return redirect(url_for("user_dashboard"))
 
     errors = []
     for vm in clusters[cluster_name]:

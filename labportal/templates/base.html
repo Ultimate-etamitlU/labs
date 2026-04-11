@@ -64,12 +64,24 @@
         <section class="pf-v5-c-page__main-section">
             {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
+            <div class="toast-container" id="toast-container">
                 {% for category, message in messages %}
-                <div class="pf-v5-c-alert pf-m-{{ 'success' if category == 'success' else ('danger' if category == 'danger' else ('warning' if category == 'warning' else 'info')) }} pf-m-inline" style="margin-bottom: 1rem;">
-                    <div class="pf-v5-c-alert__icon"><i class="fas fa-fw"></i></div>
-                    <p class="pf-v5-c-alert__title">{{ message }}</p>
+                <div class="toast-msg toast-{{ 'success' if category == 'success' else ('danger' if category == 'danger' else ('warning' if category == 'warning' else 'info')) }}">
+                    <span class="toast-text">{{ message }}</span>
+                    <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
                 </div>
                 {% endfor %}
+            </div>
+            <script>
+            setTimeout(function() {
+                var toasts = document.querySelectorAll('.toast-msg');
+                toasts.forEach(function(t) {
+                    t.style.opacity = '0';
+                    t.style.transform = 'translateX(100%)';
+                    setTimeout(function() { t.remove(); }, 400);
+                });
+            }, 6000);
+            </script>
             {% endif %}
             {% endwith %}
 
