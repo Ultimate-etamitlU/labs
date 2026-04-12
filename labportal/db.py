@@ -48,6 +48,15 @@ def init_db():
             expires_at TIMESTAMP NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            event TEXT NOT NULL,
+            user_email TEXT,
+            ip_address TEXT,
+            details TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS deployments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cluster_name TEXT NOT NULL,

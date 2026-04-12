@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Activity Log — OCP Lab Portal{% endblock %}
+{% block content %}
+<div style="text-align: center; padding: 0.75rem 0; margin-bottom: 0.5rem;">
+    <h1 style="color: #ee0000; font-size: 1.4rem; margin: 0; font-weight: 800; font-family: 'Red Hat Display', sans-serif;">Activity Log</h1>
+    <p style="color: #8a8d90; font-size: 0.85rem; margin: 0.25rem 0 0;">{{ total }} events recorded</p>
+</div>
+
+<div class="dash-card">
+    <div class="dash-card-header" style="justify-content: space-between;">
+        <h2>Events</h2>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <form method="get" style="display: flex; gap: 0.5rem; align-items: center;">
+                <select name="event" class="pf-v5-c-form-control" style="width: auto; font-size: 0.8rem; padding: 0.25rem 0.5rem;"
+                        onchange="this.form.submit()">
+                    <option value="">All events</option>
+                    {% for et in event_types %}
+                    <option value="{{ et }}" {{ 'selected' if event_filter == et }}>{{ et }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            <a href="{{ url_for('user_dashboard') }}" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;">Back to Dashboard</a>
+        </div>
+    </div>
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem;">
+            <thead>
+                <tr style="border-bottom: 2px solid #3c3f42; color: #8a8d90; text-align: left;">
+                    <th style="padding: 0.5rem 0.75rem;">Timestamp</th>
+                    <th style="padding: 0.5rem 0.75rem;">Event</th>
+                    <th style="padding: 0.5rem 0.75rem;">User</th>
+                    <th style="padding: 0.5rem 0.75rem;">IP Address</th>
+                    <th style="padding: 0.5rem 0.75rem;">Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr style="border-bottom: 1px solid #3c3f42;">
+                    <td style="padding: 0.4rem 0.75rem; white-space: nowrap; color: #8a8d90;">{{ log.timestamp }}</td>
+                    <td style="padding: 0.4rem 0.75rem;">
+                        {% if 'login' in log.event %}
+                        <span style="color: #73bcf7;">{{ log.event }}</span>
+                        {% elif 'create' in log.event %}
+                        <span style="color: #4caf50;">{{ log.event }}</span>
+                        {% elif 'delete' in log.event %}
+                        <span style="color: #ef5350;">{{ log.event }}</span>
+                        {% elif 'failed' in log.event %}
+                        <span style="color: #ef5350;">{{ log.event }}</span>
+                        {% else %}
+                        <span style="color: #c7c7c7;">{{ log.event }}</span>
+                        {% endif %}
+                    </td>
+                    <td style="padding: 0.4rem 0.75rem; color: #c7c7c7;">{{ log.user_email or '—' }}</td>
+                    <td style="padding: 0.4rem 0.75rem; color: #8a8d90; font-family: monospace;">{{ log.ip_address or '—' }}</td>
+                    <td style="padding: 0.4rem 0.75rem; color: #c7c7c7;">{{ log.details or '—' }}</td>
+                </tr>
+                {% endfor %}
+                {% if not logs %}
+                <tr>
+                    <td colspan="5" style="padding: 1.5rem; text-align: center; color: #8a8d90;">No activity recorded yet.</td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if total_pages > 1 %}
+    <div style="display: flex; justify-content: center; gap: 0.5rem; padding: 1rem 0;">
+        {% if page > 1 %}
+        <a href="?event={{ event_filter }}&page={{ page - 1 }}" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem;">&laquo; Prev</a>
+        {% endif %}
+        <span style="color: #8a8d90; font-size: 0.82rem; padding: 0.3rem 0.5rem;">Page {{ page }} of {{ total_pages }}</span>
+        {% if page < total_pages %}
+        <a href="?event={{ event_filter }}&page={{ page + 1 }}" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem;">Next &raquo;</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

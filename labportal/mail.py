@@ -121,11 +121,10 @@ Lab Admin
 
 def _send(to_addr, subject, body):
     """Send an email via SMTP. Fails silently with a log if SMTP is unavailable."""
-    if not to_addr:
-        print("[mail] No recipient address configured, skipping.")
-        return
-
     from_addr = config.from_email()
+    if not to_addr or not from_addr:
+        print(f"[mail] Skipping — from={from_addr!r}, to={to_addr!r}")
+        return
     msg = MIMEMultipart()
     msg["From"] = from_addr
     msg["To"] = to_addr

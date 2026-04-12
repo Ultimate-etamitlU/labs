@@ -5,6 +5,9 @@
     <h1 style="color: #ee0000; font-size: 1.4rem; margin: 0; font-weight: 800; font-family: 'Red Hat Display', sans-serif; letter-spacing: 0.02em;">
         Welcome, {{ session.get('user_name', 'User') }}
     </h1>
+    {% if session.get('admin') %}
+    <a href="{{ url_for('admin_activity') }}" style="color: #73bcf7; font-size: 0.82rem;">View Activity Log</a>
+    {% endif %}
 </div>
 
 <!-- System Resources -->
