@@ -199,7 +199,7 @@ check_and_get_tool() {
     local sha_file="$BASE_DIR/${tool}-sha256.txt"
     if curl --fail -sSL "$MIRROR_URL/sha256sum.txt" -o "$sha_file" 2>/dev/null; then
         local expected
-        expected=$(grep "${tool}-linux.tar.gz" "$sha_file" | awk '{print $1}')
+        expected=$(grep "${tool}-linux" "$sha_file" | grep -v arm64 | grep -v ppc64 | grep -v s390x | head -1 | awk '{print $1}' || true)
         if [ -n "$expected" ]; then
             local actual
             actual=$(sha256sum "$BASE_DIR/${tool}.tar.gz" | awk '{print $1}')
@@ -387,24 +387,26 @@ deploy_node "${VM_PREFIX}-worker-1"  16384 2  "52:54:00:${MAC_BASE}:00:15" "work
 # --- 6. MONITORING & CSR APPROVAL ---
 export KUBECONFIG="$INSTALL_DIR/auth/kubeconfig"
 
+echo "Starting background CSR approval loop (initial 20 min delay, then every 5 min)..."
+(
+    set +e
+    sleep 1200  # Wait 20 minutes before first check
+    while true; do
+        pending=$(oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null)
+        if [ -n "$pending" ]; then
+            echo "[CSR] Approving pending CSRs..."
+            echo "$pending" | xargs oc adm certificate approve 2>/dev/null
+        fi
+        sleep 300  # Check every 5 minutes
+    done
+) &
+CSR_PID=$!
+
 echo "Waiting for Bootstrap (this takes approx 20 mins)..."
 openshift-install wait-for bootstrap-complete --dir=. --log-level=info
 
 echo "Deleting Bootstrap VM to reclaim RAM..."
 virsh destroy "${VM_PREFIX}-bootstrap" 2>/dev/null && virsh undefine "${VM_PREFIX}-bootstrap" --remove-all-storage 2>/dev/null
-
-echo "Starting background CSR approval loop..."
-(
-    set +e
-    while true; do
-        pending=$(oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null)
-        if [ -n "$pending" ]; then
-            echo "$pending" | xargs oc adm certificate approve 2>/dev/null
-        fi
-        sleep 30
-    done
-) &
-CSR_PID=$!
 
 echo "Waiting for Final Installation..."
 openshift-install wait-for install-complete --dir=. --log-level=info
