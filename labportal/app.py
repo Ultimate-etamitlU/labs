@@ -339,8 +339,12 @@ def index():
     }
     conn.close()
     vms, clusters, resources = get_lab_status()
+    ssh_user = ""
+    if session.get("user_email"):
+        ssh_user = derive_linux_username(session["user_email"])
     return render_template("index.html", stats=stats,
-                           vms=vms, clusters=clusters, resources=resources)
+                           vms=vms, clusters=clusters, resources=resources,
+                           ssh_user=ssh_user, base_domain=config.base_domain())
 
 
 @app.route("/request", methods=["GET", "POST"])

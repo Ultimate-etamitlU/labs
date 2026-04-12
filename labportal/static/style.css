@@ -1,17 +1,17 @@
-/* Lab Portal — Dashboard Theme */
+/* Lab Portal — Dashboard Theme (PF5 Dark) */
 
 /* Page structure */
 body.pf-v5-c-page {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    background: #0c0c0e;
+    background: #1b1d21;
     font-family: 'Red Hat Text', 'Red Hat Display', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 .pf-v5-c-page__main {
     flex: 1;
-    background: linear-gradient(180deg, #0c0c0e 0%, #111114 100%);
+    background: #1b1d21;
 }
 
 .pf-v5-c-page__main-section {
@@ -24,13 +24,13 @@ body.pf-v5-c-page {
 
 /* Masthead */
 .pf-v5-c-masthead {
-    --pf-v5-c-masthead--BackgroundColor: rgba(12, 12, 14, 0.95);
-    border-bottom: 1px solid rgba(238, 0, 0, 0.4);
-    backdrop-filter: blur(12px);
+    --pf-v5-c-masthead--BackgroundColor: #151515;
+    background: #151515;
+    border-bottom: 2px solid #ee0000;
 }
 
 .pf-v5-c-masthead__brand {
-    color: #fff;
+    color: #f0f0f0;
     text-decoration: none;
     font-size: 1.1rem;
     font-weight: 700;
@@ -43,7 +43,6 @@ body.pf-v5-c-page {
 .brand-hat {
     height: 22px;
     width: auto;
-    filter: drop-shadow(0 0 6px rgba(238, 0, 0, 0.4));
 }
 
 .brand-dot {
@@ -52,11 +51,10 @@ body.pf-v5-c-page {
     height: 10px;
     background: #ee0000;
     border-radius: 50%;
-    box-shadow: 0 0 8px rgba(238, 0, 0, 0.6);
 }
 
 .pf-v5-c-masthead__content .pf-v5-c-nav__link {
-    color: #888;
+    color: #c7c7c7;
     transition: color 0.2s;
     font-size: 0.9rem;
 }
@@ -66,12 +64,11 @@ body.pf-v5-c-page {
 
 /* Dashboard cards */
 .dash-card {
-    background: linear-gradient(135deg, rgba(30, 30, 35, 0.9) 0%, rgba(22, 22, 28, 0.95) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 12px;
+    background: #212427;
+    border: 1px solid #3c3f42;
+    border-radius: 8px;
     margin-bottom: 1rem;
     overflow: hidden;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .dash-card-header {
@@ -79,14 +76,15 @@ body.pf-v5-c-page {
     align-items: center;
     justify-content: space-between;
     padding: 1rem 1.25rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid #3c3f42;
+    background: #1b1d21;
 }
 
 .dash-card-header h2 {
     margin: 0;
     font-size: 0.9rem;
     font-weight: 700;
-    color: #ccc;
+    color: #e0e0e0;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-family: 'Red Hat Display', sans-serif;
@@ -97,7 +95,7 @@ body.pf-v5-c-page {
 }
 
 .dash-card-body p {
-    color: #999;
+    color: #c7c7c7;
     margin: 0;
     line-height: 1.5;
 }
@@ -135,14 +133,14 @@ body.pf-v5-c-page {
     flex-direction: column;
     align-items: center;
     padding: 1rem;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    border-radius: 10px;
+    background: #292c30;
+    border: 1px solid #3c3f42;
+    border-radius: 8px;
     transition: background 0.2s;
 }
 
 .resource-tile:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: #2f3337;
 }
 
 /* Ring charts */
@@ -161,13 +159,13 @@ body.pf-v5-c-page {
 
 .ring-bg {
     fill: none;
-    stroke: rgba(255, 255, 255, 0.06);
+    stroke: #3c3f42;
     stroke-width: 3;
 }
 
 .ring-fill {
     fill: none;
-    stroke: #73bcf7;
+    stroke: #06c;
     stroke-width: 3;
     stroke-linecap: round;
     transition: stroke-dasharray 0.6s ease;
@@ -180,14 +178,14 @@ body.pf-v5-c-page {
     transform: translate(-50%, -50%);
     font-size: 0.9rem;
     font-weight: 700;
-    color: #e0e0e0;
+    color: #f0f0f0;
     font-family: 'Red Hat Mono', monospace;
 }
 
 .resource-big-num {
     font-size: 2rem;
     font-weight: 700;
-    color: #e0e0e0;
+    color: #f0f0f0;
     font-family: 'Red Hat Mono', monospace;
     line-height: 1;
     margin-bottom: 0.5rem;
@@ -198,7 +196,7 @@ body.pf-v5-c-page {
 
 .resource-label {
     font-size: 0.75rem;
-    color: #888;
+    color: #c7c7c7;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
@@ -206,14 +204,14 @@ body.pf-v5-c-page {
 
 .resource-sub {
     font-size: 0.7rem;
-    color: #555;
+    color: #8a8d90;
     margin-top: 0.15rem;
 }
 
 /* Cluster groups */
 .cluster-group {
     padding: 1rem 1.25rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid #3c3f42;
 }
 
 .cluster-group:last-child {
@@ -232,13 +230,12 @@ body.pf-v5-c-page {
     height: 8px;
     background: #ee0000;
     border-radius: 50%;
-    box-shadow: 0 0 6px rgba(238, 0, 0, 0.5);
 }
 
 .cluster-name {
     font-size: 1rem;
     font-weight: 700;
-    color: #e0e0e0;
+    color: #f0f0f0;
     font-family: 'Red Hat Mono', monospace;
 }
 
@@ -251,15 +248,15 @@ body.pf-v5-c-page {
 }
 
 .badge-ok {
-    color: #4ade80;
-    background: rgba(74, 222, 128, 0.1);
-    border: 1px solid rgba(74, 222, 128, 0.2);
+    color: #3e8635;
+    background: rgba(62, 134, 53, 0.12);
+    border: 1px solid rgba(62, 134, 53, 0.3);
 }
 
 .badge-warn {
-    color: #fbbf24;
-    background: rgba(251, 191, 36, 0.1);
-    border: 1px solid rgba(251, 191, 36, 0.2);
+    color: #f0ab00;
+    background: rgba(240, 171, 0, 0.12);
+    border: 1px solid rgba(240, 171, 0, 0.3);
 }
 
 /* VM grid */
@@ -271,36 +268,36 @@ body.pf-v5-c-page {
 
 .vm-tile {
     padding: 0.75rem;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s;
+    border-radius: 6px;
+    border: 1px solid #3c3f42;
+    background: #292c30;
+    transition: background 0.2s;
 }
 
 .vm-running {
-    background: rgba(74, 222, 128, 0.04);
-    border-color: rgba(74, 222, 128, 0.12);
+    border-color: #3e8635;
+    background: rgba(62, 134, 53, 0.08);
 }
 
 .vm-off {
-    background: rgba(239, 68, 68, 0.04);
-    border-color: rgba(239, 68, 68, 0.1);
+    border-color: #c9190b;
+    background: rgba(201, 25, 11, 0.06);
 }
 
 .vm-tile:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    background: #2f3337;
 }
 
 .vm-name {
     font-family: 'Red Hat Mono', monospace;
     font-size: 0.85rem;
     font-weight: 600;
-    color: #d0d0d0;
+    color: #e0e0e0;
 }
 
 .vm-role {
     font-size: 0.7rem;
-    color: #666;
+    color: #8a8d90;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     margin: 0.2rem 0;
@@ -311,7 +308,7 @@ body.pf-v5-c-page {
     align-items: center;
     gap: 0.35rem;
     font-size: 0.75rem;
-    color: #888;
+    color: #c7c7c7;
 }
 
 .state-dot {
@@ -321,19 +318,17 @@ body.pf-v5-c-page {
 }
 
 .dot-green {
-    background: #4ade80;
-    box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+    background: #3e8635;
 }
 
 .dot-red {
-    background: #ef4444;
-    box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+    background: #c9190b;
 }
 
 .empty-clusters {
     padding: 2rem;
     text-align: center;
-    color: #555;
+    color: #8a8d90;
 }
 
 /* Stat pills */
@@ -342,30 +337,30 @@ body.pf-v5-c-page {
     font-size: 0.75rem;
     padding: 0.2rem 0.6rem;
     border-radius: 20px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: #aaa;
+    background: #292c30;
+    border: 1px solid #4f5255;
+    color: #c7c7c7;
     margin-right: 0.4rem;
 }
 
 .pill-orange {
-    color: #fbbf24;
-    border-color: rgba(251, 191, 36, 0.2);
-    background: rgba(251, 191, 36, 0.08);
+    color: #f0ab00;
+    border-color: rgba(240, 171, 0, 0.3);
+    background: rgba(240, 171, 0, 0.1);
 }
 
 /* Code block */
 .code-block {
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 8px;
+    background: #151515;
+    border: 1px solid #3c3f42;
+    border-radius: 6px;
     padding: 0.75rem 1rem;
     margin-top: 0.75rem;
     overflow-x: auto;
 }
 
 .code-block code {
-    color: #73bcf7;
+    color: #06c;
     font-family: 'Red Hat Mono', monospace;
     font-size: 0.8rem;
     line-height: 1.6;
@@ -373,83 +368,96 @@ body.pf-v5-c-page {
 
 /* Cards (PF overrides for login/forms) */
 .pf-v5-c-card {
-    background: linear-gradient(135deg, rgba(30, 30, 35, 0.9) 0%, rgba(22, 22, 28, 0.95) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    background: #212427;
+    border: 1px solid #3c3f42;
+    border-radius: 8px;
 }
 
 .pf-v5-c-card__title-text {
     border-bottom: 2px solid #ee0000;
     padding-bottom: 0.5rem;
-    color: #e0e0e0;
+    color: #f0f0f0;
 }
 
 .pf-v5-c-card__body {
-    color: #bbb;
+    color: #c7c7c7;
 }
 
 /* Forms — dark theme */
 .pf-v5-c-form__label-text {
-    color: #ccc;
+    color: #e0e0e0;
 }
 
 .pf-v5-c-form-control {
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    color: #e0e0e0;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    background: #151515;
+    border: 1px solid #4f5255;
+    border-radius: 4px;
+    color: #f0f0f0;
+    transition: border-color 0.2s;
 }
 
 .pf-v5-c-form-control:focus {
-    border-color: #73bcf7;
-    box-shadow: 0 0 0 2px rgba(115, 188, 247, 0.15);
-    outline: none;
+    border-color: #06c;
+    outline: 2px solid rgba(0, 102, 204, 0.25);
 }
 
 .pf-v5-c-form-control::placeholder {
-    color: #555;
+    color: #6a6e73;
 }
 
 .pf-v5-c-helper-text__item-text {
-    color: #666;
+    color: #8a8d90;
 }
 
 /* Buttons */
 .pf-v5-c-button.pf-m-primary {
-    background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%);
+    background: #ee0000;
     border: none;
-    border-radius: 6px;
+    border-radius: 4px;
     font-weight: 600;
-    box-shadow: 0 2px 8px rgba(238, 0, 0, 0.25);
-    transition: all 0.2s;
+    transition: background 0.2s;
 }
 
 .pf-v5-c-button.pf-m-primary:hover {
-    background: linear-gradient(135deg, #ff1a1a 0%, #dd0000 100%);
-    box-shadow: 0 4px 16px rgba(238, 0, 0, 0.35);
-    transform: translateY(-1px);
+    background: #a30000;
 }
 
 .pf-v5-c-button.pf-m-secondary {
-    color: #ccc;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
+    color: #e0e0e0;
+    border: 1px solid #4f5255;
+    border-radius: 4px;
     background: transparent;
 }
 
 .pf-v5-c-button.pf-m-secondary:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: #292c30;
+    color: #fff;
+}
+
+.pf-v5-c-button.pf-m-tertiary {
+    color: #c7c7c7;
+    border: 1px solid #4f5255;
+    border-radius: 4px;
+    background: transparent;
+}
+
+.pf-v5-c-button.pf-m-tertiary:hover {
+    background: #292c30;
     color: #fff;
 }
 
 .pf-v5-c-button.pf-m-danger {
-    border-radius: 6px;
+    border-radius: 4px;
+    background: #c9190b;
+    border: none;
+}
+
+.pf-v5-c-button.pf-m-danger:hover {
+    background: #a30000;
 }
 
 .pf-v5-c-button.pf-m-link {
-    color: #73bcf7;
+    color: #06c;
 }
 
 /* Tables */
@@ -458,44 +466,44 @@ body.pf-v5-c-page {
 }
 
 .pf-v5-c-table__thead {
-    background: rgba(0, 0, 0, 0.2);
+    background: #1b1d21;
 }
 
 .pf-v5-c-table__th {
-    color: #888;
+    color: #c7c7c7;
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
 
 .pf-v5-c-table__td {
-    color: #ccc;
-    border-bottom-color: rgba(255, 255, 255, 0.04);
+    color: #e0e0e0;
+    border-bottom-color: #3c3f42;
 }
 
 .pf-v5-c-table__tr:hover {
-    background: rgba(255, 255, 255, 0.02);
+    background: #292c30;
 }
 
 /* Content text */
-.pf-v5-c-content h1, .pf-v5-c-content h2 { color: #fff; }
-.pf-v5-c-content p { color: #999; }
+.pf-v5-c-content h1, .pf-v5-c-content h2 { color: #f0f0f0; }
+.pf-v5-c-content p { color: #c7c7c7; }
 
 /* Toolbar */
 .pf-v5-c-toolbar { background: transparent; }
 
 /* Labels */
 .pf-v5-c-label.pf-m-outline {
-    border-color: rgba(255, 255, 255, 0.1);
-    color: #bbb;
+    border-color: #4f5255;
+    color: #c7c7c7;
 }
 
 /* Empty state */
-.pf-v5-c-empty-state { color: #888; }
-.pf-v5-c-empty-state__title-text { color: #ccc; }
+.pf-v5-c-empty-state { color: #c7c7c7; }
+.pf-v5-c-empty-state__title-text { color: #e0e0e0; }
 
 /* Alerts */
-.pf-v5-c-alert { border-radius: 8px; }
+.pf-v5-c-alert { border-radius: 6px; }
 
 /* Toast notifications */
 .toast-container {
@@ -516,35 +524,34 @@ body.pf-v5-c-page {
     align-items: center;
     gap: 0.75rem;
     padding: 1rem 1.25rem;
-    border-radius: 10px;
-    backdrop-filter: blur(16px);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 60px rgba(0, 0, 0, 0.3);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     animation: toastDropIn 0.4s ease-out;
     transition: opacity 0.4s, transform 0.4s;
 }
 
 .toast-success {
-    background: rgba(74, 222, 128, 0.15);
-    border: 1px solid rgba(74, 222, 128, 0.3);
-    color: #4ade80;
+    background: #1e4620;
+    border: 1px solid #3e8635;
+    color: #e0e0e0;
 }
 
 .toast-danger {
-    background: rgba(239, 68, 68, 0.15);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: #ef4444;
+    background: #470000;
+    border: 1px solid #c9190b;
+    color: #e0e0e0;
 }
 
 .toast-warning {
-    background: rgba(251, 191, 36, 0.15);
-    border: 1px solid rgba(251, 191, 36, 0.3);
-    color: #fbbf24;
+    background: #3e2c00;
+    border: 1px solid #f0ab00;
+    color: #e0e0e0;
 }
 
 .toast-info {
-    background: rgba(115, 188, 247, 0.15);
-    border: 1px solid rgba(115, 188, 247, 0.3);
-    color: #73bcf7;
+    background: #002952;
+    border: 1px solid #06c;
+    color: #e0e0e0;
 }
 
 .toast-text {
@@ -578,11 +585,11 @@ body.pf-v5-c-page {
 .portal-footer {
     text-align: center;
     padding: 0.75rem;
-    color: #444;
+    color: #6a6e73;
     font-size: 0.8rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    border-top: 1px solid #3c3f42;
     margin-top: auto;
-    background: rgba(0, 0, 0, 0.2);
+    background: #151515;
 }
 
 /* Bullseye layout */
