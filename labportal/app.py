@@ -259,8 +259,8 @@ def setup():
 
         # Validation
         errors = []
-        if not admin_password or len(admin_password) < 6:
-            errors.append("Admin password must be at least 6 characters.")
+        if not admin_password or len(admin_password) < 8:
+            errors.append("Admin password must be at least 8 characters.")
         if admin_password != admin_password2:
             errors.append("Passwords do not match.")
         if not domain:
@@ -829,6 +829,9 @@ def cli_set_password():
     pw2 = getpass.getpass("Confirm: ")
     if pw != pw2:
         print("Passwords don't match.")
+        sys.exit(1)
+    if len(pw) < 8:
+        print("Password must be at least 8 characters.")
         sys.exit(1)
     set_admin_password(pw)
     print(f"Admin password set for user '{config.admin_user()}'.")
