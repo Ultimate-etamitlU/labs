@@ -18,7 +18,8 @@ from flask import (
 
 import config
 from db import get_db, init_db
-from mail import send_admin_notification, send_user_approved, send_user_denied
+from mail import (send_admin_notification, send_user_approved, send_user_denied,
+                 send_password_reset_notification, send_reset_token_email)
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -475,6 +476,25 @@ def admin_toggle_user(user_id):
     return redirect(url_for("admin_panel", status="all"))
 
 
+@app.route("/admin/user/<int:user_id>/reset-password", methods=["POST"])
+@login_required
+def admin_reset_password(user_id):
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        abort(404)
+    password = generate_password()
+    conn.execute("UPDATE users SET password_hash=? WHERE id=?",
+                 (hash_password(password), user_id))
+    conn.commit()
+    conn.close()
+    full_name = f"{user['first_name']} {user['last_name']}"
+    send_password_reset_notification(user["email"], full_name, password)
+    flash(f"Password reset for {full_name}. New credentials emailed to {user['email']}.", "success")
+    return redirect(url_for("admin_panel", status="all"))
+
+
 def derive_linux_username(email):
     """Derive Linux username from email: part before @, lowercase."""
     local = email.split("@")[0].lower()
@@ -625,6 +645,67 @@ def admin_action(req_id):
 
 
 # --- User Auth ---
+
+@app.route("/user/forgot-password", methods=["GET", "POST"])
+@setup_required
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE email=? AND is_active=1",
+                            (email,)).fetchone()
+        if user:
+            token = secrets.token_urlsafe(32)
+            expires = datetime.utcnow().isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT OR REPLACE INTO password_resets (email, token, expires_at) "
+                "VALUES (?, ?, datetime(?, '+1 hour'))",
+                (email, token, expires)
+            )
+            conn.commit()
+            send_reset_token_email(email,
+                                   f"{user['first_name']} {user['last_name']}",
+                                   token)
+        conn.close()
+        flash("If that email exists in our system, a reset link has been sent.", "success")
+        return redirect(url_for("user_login"))
+    return render_template("forgot_password.html")
+
+
+@app.route("/user/reset-password/<token>", methods=["GET", "POST"])
+@setup_required
+def reset_password(token):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM password_resets WHERE token=? AND expires_at > datetime('now')",
+        (token,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        flash("Invalid or expired reset link. Please request a new one.", "danger")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        password2 = request.form.get("password2", "")
+        if len(password) < 8:
+            flash("Password must be at least 8 characters.", "danger")
+            return render_template("reset_password.html", token=token)
+        if password != password2:
+            flash("Passwords do not match.", "danger")
+            return render_template("reset_password.html", token=token)
+
+        conn.execute("UPDATE users SET password_hash=? WHERE email=?",
+                     (hash_password(password), row["email"]))
+        conn.execute("DELETE FROM password_resets WHERE email=?", (row["email"],))
+        conn.commit()
+        conn.close()
+        flash("Password updated. You can now log in.", "success")
+        return redirect(url_for("user_login"))
+
+    conn.close()
+    return render_template("reset_password.html", token=token)
+
 
 @app.route("/user/login", methods=["GET", "POST"])
 @setup_required

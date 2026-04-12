@@ -394,17 +394,13 @@ echo "Deleting Bootstrap VM to reclaim RAM..."
 virsh destroy "${VM_PREFIX}-bootstrap" 2>/dev/null && virsh undefine "${VM_PREFIX}-bootstrap" --remove-all-storage 2>/dev/null
 
 echo "Starting background CSR approval loop..."
-# Run in a process group (set -m) so we can kill the entire group on cleanup
 (
     set +e
     while true; do
-        # Only approve CSRs from nodes matching this cluster's hostnames
-        for csr in $(oc get csr -o jsonpath='{.items[?(@.status == {})].metadata.name}' 2>/dev/null); do
-            requesting_node=$(oc get csr "$csr" -o jsonpath='{.spec.username}' 2>/dev/null)
-            if echo "$requesting_node" | grep -q "${CLUSTER_NAME}"; then
-                oc adm certificate approve "$csr" 2>/dev/null
-            fi
-        done
+        pending=$(oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null)
+        if [ -n "$pending" ]; then
+            echo "$pending" | xargs oc adm certificate approve 2>/dev/null
+        fi
         sleep 30
     done
 ) &

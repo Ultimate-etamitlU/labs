@@ -42,6 +42,12 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS password_resets (
+            email TEXT PRIMARY KEY,
+            token TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS deployments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cluster_name TEXT NOT NULL,

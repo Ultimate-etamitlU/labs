@@ -117,13 +117,17 @@
                     {% endif %}
                 </td>
                 <td class="pf-v5-c-table__td" style="font-size: 0.85rem;">{{ user.created_at }}</td>
-                <td class="pf-v5-c-table__td">
+                <td class="pf-v5-c-table__td" style="display: flex; gap: 0.5rem;">
                     <form method="post" action="{{ url_for('admin_toggle_user', user_id=user.id) }}">
                         {% if user.is_active %}
                         <button type="submit" class="pf-v5-c-button pf-m-danger pf-m-small">Disable</button>
                         {% else %}
                         <button type="submit" class="pf-v5-c-button pf-m-primary pf-m-small">Enable</button>
                         {% endif %}
+                    </form>
+                    <form method="post" action="{{ url_for('admin_reset_password', user_id=user.id) }}"
+                          onsubmit="return confirm('Reset password for {{ user.email }}? New credentials will be emailed.')">
+                        <button type="submit" class="pf-v5-c-button pf-m-warning pf-m-small">Reset Password</button>
                     </form>
                 </td>
             </tr>
