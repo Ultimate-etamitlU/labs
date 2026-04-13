@@ -91,7 +91,7 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("admin"):
-            return redirect(url_for("login"))
+            return redirect(url_for("user_login"))
         return f(*args, **kwargs)
     return decorated
 
@@ -107,12 +107,13 @@ def user_login_required(f):
 
 def log_activity(event, details=None):
     """Record an event in the activity_log table."""
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr
     conn = get_db()
     conn.execute(
         "INSERT INTO activity_log (event, user_email, ip_address, details) VALUES (?, ?, ?, ?)",
         (event,
          session.get("user_email") or session.get("admin_user", ""),
-         request.remote_addr if request else None,
+         client_ip,
          details)
     )
     conn.commit()
@@ -454,31 +455,14 @@ def request_access():
                            first_name="", last_name="", email="", reason="")
 
 
-@app.route("/login", methods=["GET", "POST"])
-@setup_required
+@app.route("/login")
 def login():
-    if request.method == "POST":
-        username = request.form.get("username", "")
-        password = request.form.get("password", "")
-
-        stored_hash = get_admin_password_hash()
-        if not stored_hash:
-            flash("Admin password not set. Complete the setup wizard first.", "danger")
-            return render_template("login.html")
-
-        if username == config.admin_user() and verify_password(password, stored_hash):
-            session["admin"] = True
-            return redirect(url_for("admin_panel"))
-        else:
-            flash("Invalid credentials.", "danger")
-
-    return render_template("login.html")
+    return redirect(url_for("user_login"))
 
 
 @app.route("/logout")
 def logout():
-    session.pop("admin", None)
-    return redirect(url_for("index"))
+    return redirect(url_for("user_logout"))
 
 
 @app.route("/admin")
