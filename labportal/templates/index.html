@@ -69,8 +69,8 @@
                     </span>
                     {% if session.get('user_email') or session.get('admin') %}
                     <div style="margin-left: auto; display: flex; gap: 0.5rem;">
-                        <a href="{{ url_for('cluster_kubeconfig', cluster_name=cluster_name) }}" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;" title="Download kubeconfig">
-                            &#x21E9; kubeconfig
+                        <a href="{{ url_for('user_terminal', cluster=cluster_name) }}" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">
+                            &#x25B6; Terminal
                         </a>
                         <button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;"
                                 onclick="showCliModal('{{ cluster_name }}', '{{ cluster_versions.get(cluster_name, '') }}')">
@@ -358,7 +358,7 @@ document.addEventListener('keydown', function(e) {
                     if (isLoggedIn) {
                         var ver = versions[name] || '';
                         html += '<div style="margin-left:auto;display:flex;gap:0.5rem;">';
-                        html += '<a href="/labs/cluster/kubeconfig/' + name + '" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Download kubeconfig">&#x21E9; kubeconfig</a>';
+                        html += '<a href="/labs/user/terminal?cluster=' + name + '" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">&#x25B6; Terminal</a>';
                         html += '<button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showCliModal(\'' + name + '\', \'' + ver + '\')">CLI Access</button>';
                         html += '<a href="/labs/cluster/logs/' + name + '" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">View Logs</a>';
                         html += '</div>';

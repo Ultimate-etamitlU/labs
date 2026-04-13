@@ -457,6 +457,28 @@ else
     echo "  firewalld not running — skipping (ensure ports 6443,22623,443,80 are open for VMs)"
 fi
 
+# Ensure Apache mod_proxy_wstunnel is available for web terminal WebSocket proxying
+echo ""
+echo "=== Checking Apache WebSocket proxy module ==="
+if command -v httpd &>/dev/null; then
+    if httpd -M 2>/dev/null | grep -q proxy_wstunnel_module; then
+        echo "  mod_proxy_wstunnel already loaded"
+    else
+        echo "  WARN: mod_proxy_wstunnel not loaded — web terminal requires it"
+        echo "  Install: dnf install mod_proxy_html (or ensure proxy_wstunnel.so is in modules dir)"
+    fi
+    # Ensure required Python packages for web terminal
+    if python3 -c "import flask_socketio" 2>/dev/null; then
+        echo "  flask-socketio installed"
+    else
+        echo "  Installing flask-socketio and simple-websocket..."
+        pip3 install flask-socketio simple-websocket 2>/dev/null || \
+            echo "  WARN: Could not install flask-socketio — web terminal will not work"
+    fi
+else
+    echo "  httpd not installed — skipping"
+fi
+
 # Reload services
 echo ""
 echo "=== Reloading services ==="

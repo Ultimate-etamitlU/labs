@@ -2,12 +2,19 @@
 """
 Lab Portal — lightweight web app for managing OCP lab access requests.
 """
+import fcntl
 import hashlib
 import json
 import os
+import pty
 import secrets
+import select
+import signal
+import struct
 import subprocess
 import sys
+import termios
+import threading
 from datetime import datetime
 from functools import wraps
 
@@ -15,6 +22,7 @@ from flask import (
     Flask, render_template, request, redirect, url_for,
     flash, session, abort, jsonify, send_file
 )
+from flask_socketio import SocketIO, emit, disconnect
 
 import config
 from db import get_db, init_db
@@ -46,6 +54,17 @@ class PrefixMiddleware:
 
 
 app.wsgi_app = PrefixMiddleware(app.wsgi_app, prefix="/labs")
+
+socketio = SocketIO(app, path="socket.io", cors_allowed_origins="*",
+                    async_mode="threading")
+
+# Auto-reap child processes (prevents zombie terminals)
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+# Active terminal sessions: sid -> {fd, pid, last_activity}
+terminal_sessions = {}
+TERMINAL_TIMEOUT = 3600       # 1 hour inactivity timeout (seconds)
+TERMINAL_WARN_BEFORE = 300    # warn 5 minutes before timeout
 
 
 # --- Helpers ---
@@ -1016,6 +1035,163 @@ def cluster_logs(cluster_name):
     return render_template("cluster_logs.html", deployment=dep, log_content=log_content)
 
 
+# --- Web Terminal ---
+
+@app.route("/user/terminal")
+@user_login_required
+def user_terminal():
+    cluster = request.args.get("cluster", "")
+    return render_template("terminal.html", cluster=cluster)
+
+
+def _set_terminal_size(fd, rows, cols):
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+
+
+def _read_pty_output(sid, fd):
+    """Background thread: read from PTY fd and emit to WebSocket."""
+    while True:
+        try:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                data = os.read(fd, 4096)
+                if data:
+                    socketio.emit("pty_output",
+                                  {"output": data.decode("utf-8", errors="replace")},
+                                  namespace="/terminal", to=sid)
+                else:
+                    break
+        except OSError:
+            break
+    socketio.emit("pty_output", {"output": "\r\n[Session ended]\r\n"},
+                  namespace="/terminal", to=sid)
+
+
+def _cleanup_terminal(sid):
+    sess = terminal_sessions.pop(sid, None)
+    if sess:
+        try:
+            os.kill(sess["pid"], signal.SIGHUP)
+        except OSError:
+            pass
+        try:
+            os.close(sess["fd"])
+        except OSError:
+            pass
+
+
+def _find_kubeconfig(cluster_name):
+    """Find kubeconfig path for a cluster (e.g. upi1 -> /kvm/clusters/upi1-*/auth/kubeconfig)."""
+    import glob
+    matches = glob.glob(f"/kvm/clusters/{cluster_name}-*/auth/kubeconfig")
+    if matches:
+        # Sort by mtime, newest first
+        matches.sort(key=os.path.getmtime, reverse=True)
+        return matches[0]
+    return None
+
+
+@socketio.on("connect", namespace="/terminal")
+def terminal_connect(auth=None):
+    user_email = session.get("user_email")
+    if not user_email:
+        disconnect()
+        return
+
+    # All terminal sessions run as the shared 'ocpterm' user
+    linux_user = "ocpterm"
+    cluster = (auth or {}).get("cluster", "") if auth else ""
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        # Child — become ocpterm
+        os.execlp("su", "su", "-", linux_user)
+    else:
+        import time as _time
+        terminal_sessions[request.sid] = {
+            "fd": fd, "pid": pid,
+            "last_activity": _time.time(), "warned": False
+        }
+        _set_terminal_size(fd, 24, 80)
+        socketio.start_background_task(_read_pty_output, request.sid, fd)
+
+        # Auto-export KUBECONFIG if cluster was specified
+        if cluster:
+            kc_path = _find_kubeconfig(cluster)
+            if kc_path:
+                import time
+                time.sleep(0.5)  # wait for shell to be ready
+                cmd = f"export KUBECONFIG={kc_path}\n"
+                try:
+                    os.write(fd, cmd.encode())
+                except OSError:
+                    pass
+
+        log_activity("terminal_open", f"{user_email} cluster={cluster}" if cluster else user_email)
+
+
+@socketio.on("pty_input", namespace="/terminal")
+def terminal_input(data):
+    sess = terminal_sessions.get(request.sid)
+    if sess:
+        import time as _time
+        sess["last_activity"] = _time.time()
+        sess["warned"] = False
+        try:
+            os.write(sess["fd"], data["input"].encode("utf-8"))
+        except OSError:
+            pass
+
+
+@socketio.on("resize", namespace="/terminal")
+def terminal_resize(data):
+    sess = terminal_sessions.get(request.sid)
+    if sess:
+        try:
+            _set_terminal_size(sess["fd"], data["rows"], data["cols"])
+        except OSError:
+            pass
+
+
+@socketio.on("disconnect", namespace="/terminal")
+def terminal_disconnect():
+    _cleanup_terminal(request.sid)
+
+
+def _terminal_reaper():
+    """Background thread: warn idle sessions and kill timed-out ones."""
+    import time as _time
+    while True:
+        _time.sleep(60)  # check every minute
+        now = _time.time()
+        for sid, sess in list(terminal_sessions.items()):
+            idle = now - sess["last_activity"]
+
+            # Kill sessions idle beyond timeout
+            if idle >= TERMINAL_TIMEOUT:
+                socketio.emit("pty_output",
+                              {"output": "\r\n\033[1;31m[Session timed out after 1 hour of inactivity]\033[0m\r\n"},
+                              namespace="/terminal", to=sid)
+                _cleanup_terminal(sid)
+                socketio.emit("pty_output",
+                              {"output": "\r\n[Disconnected]\r\n"},
+                              namespace="/terminal", to=sid)
+                continue
+
+            # Warn 5 minutes before timeout
+            if idle >= (TERMINAL_TIMEOUT - TERMINAL_WARN_BEFORE) and not sess.get("warned"):
+                mins_left = max(1, int((TERMINAL_TIMEOUT - idle) / 60))
+                socketio.emit("pty_output",
+                              {"output": f"\r\n\033[1;33m[Warning: session will timeout in ~{mins_left} min due to inactivity]\033[0m\r\n"},
+                              namespace="/terminal", to=sid)
+                sess["warned"] = True
+
+
+# Start the reaper thread
+threading.Thread(target=_terminal_reaper, daemon=True).start()
+
+
 # --- CLI ---
 
 def cli_set_password():
@@ -1040,4 +1216,5 @@ if __name__ == "__main__":
         init_db()
         if not config.is_setup_complete():
             print("First-run setup not completed. Visit /labs/setup in the browser.")
-        app.run(host="127.0.0.1", port=5000, debug=False)
+        socketio.run(app, host="127.0.0.1", port=5000, debug=False,
+                     allow_unsafe_werkzeug=True)

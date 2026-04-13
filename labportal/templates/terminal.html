@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Terminal — OCP Lab Portal{% endblock %}
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+    <div style="display: flex; align-items: center; gap: 0.75rem;">
+        <h1 style="color: #f0f0f0; font-size: 1.1rem; margin: 0; font-weight: 700; font-family: 'Red Hat Display', sans-serif;">Terminal</h1>
+        <span class="stat-pill" style="font-size: 0.72rem;">ocpterm@{{ hostname }}</span>
+        {% if cluster %}
+        <span class="cluster-badge" style="background:#1f6bff22; color:#73bcf7; border-color:#1f6bff55;">{{ cluster }}</span>
+        {% endif %}
+        <span id="term-status" class="stat-pill pill-orange" style="font-size: 0.72rem;">connecting...</span>
+    </div>
+    <a href="{{ url_for('user_dashboard') }}" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;">Back to Dashboard</a>
+</div>
+
+<div id="terminal-container" class="terminal-container"></div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4/dist/socket.io.min.js"></script>
+<script>
+(function() {
+    var statusEl = document.getElementById("term-status");
+
+    var term = new Terminal({
+        cursorBlink: true,
+        theme: {
+            background: "#1b1d21",
+            foreground: "#f0f0f0",
+            cursor: "#f0f0f0",
+            selectionBackground: "rgba(255,255,255,0.2)"
+        },
+        fontFamily: "'Red Hat Mono', 'Menlo', 'Courier New', monospace",
+        fontSize: 14,
+        scrollback: 5000
+    });
+
+    var fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById("terminal-container"));
+    fitAddon.fit();
+
+    var socket = io("/terminal", {
+        path: "/labs/socket.io",
+        transports: ["websocket", "polling"],
+        auth: { cluster: "{{ cluster }}" }
+    });
+
+    socket.on("connect", function() {
+        statusEl.textContent = "connected";
+        statusEl.className = "stat-pill";
+        statusEl.style.fontSize = "0.72rem";
+        statusEl.style.color = "#3e8635";
+        statusEl.style.borderColor = "rgba(62,134,53,0.3)";
+        statusEl.style.background = "rgba(62,134,53,0.1)";
+        fitAddon.fit();
+        socket.emit("resize", { rows: term.rows, cols: term.cols });
+        term.focus();
+    });
+
+    socket.on("pty_output", function(data) {
+        term.write(data.output);
+    });
+
+    term.onData(function(data) {
+        socket.emit("pty_input", { input: data });
+    });
+
+    socket.on("disconnect", function() {
+        statusEl.textContent = "disconnected";
+        statusEl.className = "stat-pill pill-orange";
+        statusEl.style.fontSize = "0.72rem";
+    });
+
+    var resizeTimeout;
+    window.addEventListener("resize", function() {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(function() {
+            fitAddon.fit();
+            socket.emit("resize", { rows: term.rows, cols: term.cols });
+        }, 150);
+    });
+})();
+</script>
+{% endblock %}

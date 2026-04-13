@@ -611,5 +611,19 @@ body.pf-v5-c-page {
     background: #151515;
 }
 
+/* Web terminal */
+.terminal-container {
+    height: calc(100vh - 180px);
+    min-height: 400px;
+    background: #1b1d21;
+    border: 1px solid #3c3f42;
+    border-radius: 8px;
+    padding: 0.5rem;
+}
+
+.terminal-container .xterm {
+    height: 100%;
+}
+
 /* Bullseye layout */
 .pf-v5-l-bullseye { min-height: auto; }
