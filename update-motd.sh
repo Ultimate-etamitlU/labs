@@ -60,10 +60,16 @@ fi
             console="console-openshift-console.apps.${cluster_name}.${BASE_DOMAIN}"
             vm_count=$(virsh list --name 2>/dev/null | grep -cE "(vm-)?${cluster_name}-" || true)
 
-            # Check if API is reachable (quick timeout)
+            # Query live cluster version and status
             api_status="Unknown"
-            if KUBECONFIG="$kubeconfig" oc get clusterversion 2>/dev/null | grep -q "True"; then
-                api_status="Ready"
+            cv_out=$(KUBECONFIG="$kubeconfig" oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null)
+            if [ -n "$cv_out" ]; then
+                version="$cv_out"
+                if KUBECONFIG="$kubeconfig" oc get clusterversion 2>/dev/null | grep -q "True"; then
+                    api_status="Ready"
+                else
+                    api_status="Installing"
+                fi
             elif KUBECONFIG="$kubeconfig" oc get nodes &>/dev/null; then
                 api_status="Installing"
             else

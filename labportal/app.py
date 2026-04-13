@@ -242,6 +242,21 @@ def get_lab_status():
     except Exception:
         pass
 
+    # Count vCPUs allocated to running VMs
+    cpus_used = 0
+    for vm in vms:
+        if vm["state"] != "running":
+            continue
+        try:
+            result = subprocess.run(
+                ["virsh", "vcpucount", vm["name"], "--current"],
+                capture_output=True, text=True, timeout=5
+            )
+            cpus_used += int(result.stdout.strip())
+        except Exception:
+            pass
+    resources["cpus_used"] = str(cpus_used)
+
     try:
         disk_path = "/kvm" if os.path.ismount("/kvm") else "/"
         result = subprocess.run(

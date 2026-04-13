@@ -41,9 +41,15 @@
             <span class="resource-sub">of {{ resources.disk_total }}</span>
         </div>
         <div class="resource-tile">
-            <div class="resource-big-num">{{ resources.cpus }}</div>
+            <div class="resource-ring" data-pct="{{ ((resources.cpus_used|int * 100) / (resources.cpus|int if resources.cpus|int > 0 else 1))|int }}">
+                <svg viewBox="0 0 36 36">
+                    <path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                    <path class="ring-fill" stroke-dasharray="{{ ((resources.cpus_used|int * 100) / (resources.cpus|int if resources.cpus|int > 0 else 1))|int }}, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                </svg>
+                <span class="ring-text">{{ resources.cpus_used }}</span>
+            </div>
             <span class="resource-label">CPUs</span>
-            <span class="resource-sub">available</span>
+            <span class="resource-sub">of {{ resources.cpus }}</span>
         </div>
         <div class="resource-tile">
             <div class="resource-big-num" id="vm-count">{{ vms|length }}</div>
@@ -287,10 +293,11 @@ document.addEventListener('keydown', function(e) {
                         const ramPct = res.ram_total > 0 ? Math.round((res.ram_used * 100) / res.ram_total) : 0;
                         const diskPct = res.disk_pct ? parseInt(res.disk_pct) : 0;
                         const running = data.vms.filter(v => v.state === 'running').length;
+                        var cpuPct = res.cpus > 0 ? Math.round((res.cpus_used * 100) / res.cpus) : 0;
                         rc.innerHTML =
                             '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + ramPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.ram_used + 'G</span></div><span class="resource-label">RAM</span><span class="resource-sub">of ' + res.ram_total + 'G</span></div>' +
                             '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + diskPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.disk_used + '</span></div><span class="resource-label">Storage</span><span class="resource-sub">of ' + res.disk_total + '</span></div>' +
-                            '<div class="resource-tile"><div class="resource-big-num">' + res.cpus + '</div><span class="resource-label">CPUs</span><span class="resource-sub">available</span></div>' +
+                            '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + cpuPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.cpus_used + '</span></div><span class="resource-label">CPUs</span><span class="resource-sub">of ' + res.cpus + '</span></div>' +
                             '<div class="resource-tile"><div class="resource-big-num">' + data.vms.length + '</div><span class="resource-label">VMs</span><span class="resource-sub">' + running + ' running</span></div>';
                     }
                 }

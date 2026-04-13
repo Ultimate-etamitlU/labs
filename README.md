@@ -16,17 +16,20 @@ A self-service web portal and automation toolkit for deploying and managing Open
                          │         Web Browser              │
                          │   (PatternFly 5 Dark Theme)      │
                          └──────────────┬───────────────────┘
-                                        │ HTTPS
+                                        │ HTTPS + WebSocket
                          ┌──────────────▼───────────────────┐
                          │     Apache httpd (reverse proxy)  │
-                         │        /labs  →  :5000            │
+                         │   /labs → :5000  (HTTP + WS)     │
                          └──────────────┬───────────────────┘
                                         │
                          ┌──────────────▼───────────────────┐
-                         │        Lab Portal (Flask)         │
+                         │   Lab Portal (Flask + SocketIO)   │
                          │  ┌─────────┐  ┌───────────────┐  │
                          │  │ SQLite  │  │  SMTP Mailer   │  │
                          │  └─────────┘  └───────────────┘  │
+                         │  ┌──────────────────────────────┐ │
+                         │  │  Web Terminal (xterm.js/PTY)  │ │
+                         │  └──────────────────────────────┘ │
                          └──────────────┬───────────────────┘
                                         │ subprocess
                     ┌───────────────────▼────────────────────┐
@@ -77,9 +80,9 @@ sequenceDiagram
     Note over Script,OCP: Cluster Bootstrap
     Script->>OCP: wait-for bootstrap-complete (~30 min)
     Script->>Libvirt: Destroy bootstrap VM (reclaim RAM)
-    Script->>OCP: Auto-approve CSRs (background loop)
+    Script->>OCP: Start csr-approver@<slot> systemd service
     Script->>OCP: wait-for install-complete
-    OCP-->>Script: Cluster ready — credentials written to /etc/motd
+    OCP-->>Script: Cluster ready — MOTD updated with credentials
     end
 ```
 
@@ -89,23 +92,29 @@ sequenceDiagram
 labs/
 ├── ocp-upi-deploy.sh        # Automated OCP UPI deployment script
 ├── cluster-infra-setup.sh    # One-time DNS + HAProxy infrastructure setup
+├── csr-approver.sh           # Auto-approve CSRs until cluster ready (systemd template)
+├── update-motd.sh            # Dynamic SSH MOTD — shows active clusters + credentials
 ├── labportal/
-│   ├── app.py                # Flask application (routes, auth, cluster mgmt)
+│   ├── app.py                # Flask + SocketIO app (routes, auth, terminal, cluster mgmt)
 │   ├── config.py             # Configuration (env vars, cluster slots)
-│   ├── db.py                 # SQLite schema (users, requests, deployments)
+│   ├── db.py                 # SQLite schema (users, requests, deployments, activity)
 │   ├── mail.py               # SMTP email notifications
-│   ├── requirements.txt      # Python dependencies
+│   ├── requirements.txt      # Python dependencies (flask, flask-socketio)
 │   ├── static/
 │   │   └── style.css         # PatternFly 5 dark theme overrides
 │   └── templates/
-│       ├── base.html          # Layout with branding
-│       ├── index.html         # Public homepage with live status
-│       ├── user_login.html    # User login form
-│       ├── user_dashboard.html # Deploy/manage clusters
+│       ├── base.html          # Layout with navbar and branding
+│       ├── index.html         # Public homepage with live resource status
+│       ├── user_login.html    # Unified login (users + admins)
+│       ├── user_dashboard.html # Deploy/manage clusters, terminal access
+│       ├── terminal.html      # Web terminal (xterm.js + SocketIO)
 │       ├── cluster_logs.html  # Live deployment log viewer
+│       ├── activity_log.html  # Admin activity log with filtering
 │       ├── request_form.html  # Access request form
 │       ├── admin.html         # Admin panel (requests + users)
-│       └── login.html         # Admin login
+│       ├── setup.html         # First-run setup wizard
+│       ├── forgot_password.html # Password reset request
+│       └── reset_password.html  # Password reset form
 └── README.md
 ```
 
@@ -129,8 +138,8 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 | BIND (named) | DNS for cluster domains | `dnf install -y bind bind-utils` |
 | HAProxy | Load balancer (API, ingress) | `dnf install -y haproxy` |
 | coreos-installer | RHCOS ISO customization | `dnf install -y coreos-installer` |
-| Python 3 + Flask | Web portal | `pip install -r labportal/requirements.txt` |
-| Apache httpd | Reverse proxy for `/labs` | `dnf install -y httpd` |
+| Python 3 + Flask + SocketIO | Web portal + terminal | `pip install -r labportal/requirements.txt` |
+| Apache httpd + mod_proxy_wstunnel | Reverse proxy (HTTP + WebSocket) | `dnf install -y httpd mod_proxy_html` |
 
 **Additionally required:**
 - OpenShift pull secret at `/root/pull-secret.txt` ([Get one here](https://console.redhat.com/openshift/install/pull-secret))
@@ -161,11 +170,9 @@ The script will:
 cd labportal
 pip install -r requirements.txt
 
-# Set admin password
-python3 app.py set-password
-
 # Run directly (development)
 python3 app.py
+# First run: visit /labs/setup in browser to create admin account
 
 # Or via systemd (production)
 sudo systemctl enable --now labportal
@@ -175,8 +182,25 @@ sudo systemctl enable --now labportal
 
 ```apache
 # /etc/httpd/conf.d/labportal.conf
-ProxyPass        /labs http://127.0.0.1:5000/labs
-ProxyPassReverse /labs http://127.0.0.1:5000/labs
+<VirtualHost *:443>
+    SSLEngine on
+    SSLCertificateFile    /etc/pki/tls/certs/labportal.crt
+    SSLCertificateKeyFile /etc/pki/tls/private/labportal.key
+
+    ProxyPreserveHost On
+    ProxyTimeout 3600
+
+    # WebSocket proxy for terminal (must come before regular ProxyPass)
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/labs/socket.io/(.*) ws://127.0.0.1:5000/socket.io/$1 [P,L]
+
+    ProxyPass        /labs/socket.io ws://127.0.0.1:5000/socket.io
+    ProxyPassReverse /labs/socket.io ws://127.0.0.1:5000/socket.io
+    ProxyPass        /labs/ http://127.0.0.1:5000/
+    ProxyPassReverse /labs/ http://127.0.0.1:5000/
+</VirtualHost>
 ```
 
 ## Configuration
@@ -227,14 +251,20 @@ Click **Delete Cluster** in the portal dashboard. This will:
 
 | Feature | Description |
 |---------|-------------|
-| **Live Dashboard** | Real-time RAM, storage, CPU, VM count with SVG ring charts (5s polling) |
+| **Live Dashboard** | Real-time RAM, storage, CPU utilization, VM count with SVG ring charts (5s polling) |
+| **Web Terminal** | Browser-based shell via xterm.js + SocketIO; per-cluster Terminal buttons auto-set KUBECONFIG; 1-hour inactivity timeout |
+| **Activity Log** | Tracks login, logout, deploy, delete, terminal events with user/IP; admin-visible with filtering and pagination |
+| **Unified Login** | Single login page for users and admins; admin privileges granted via `is_admin` flag |
 | **Access Requests** | Email domain validation, spam protection (1 request / 24h) |
 | **User Accounts** | Created on admin approval, credentials emailed, enable/disable toggle |
+| **Password Reset** | Self-service forgot password flow via email token |
 | **Cluster Deploy** | One-click deploy from predefined slots, detached process |
-| **Cluster Delete** | Admin: any cluster. Users: only their own |
+| **Cluster Delete** | Admin: any cluster. Users: only their own. Cleans up VMs, storage, DB records |
 | **View Logs** | Live log tail (last 200 lines) with auto-refresh during deploy |
+| **CSR Auto-Approver** | Systemd template service (`csr-approver@<cluster>`) auto-approves CSRs until all ClusterOperators are Available or 2-hour timeout |
+| **Dynamic MOTD** | SSH login banner shows active clusters, versions (from live API), credentials, and KUBECONFIG paths |
 | **Toast Notifications** | Centered drop-in popups, auto-dismiss after 6s |
-| **Dark Theme** | PatternFly 5 dark UI with custom typography |
+| **Dark Theme** | PatternFly 5 dark UI with Red Hat Display typography |
 
 ## VM Specifications
 
