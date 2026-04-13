@@ -105,6 +105,20 @@ def user_login_required(f):
     return decorated
 
 
+def log_activity(event, details=None):
+    """Record an event in the activity_log table."""
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO activity_log (event, user_email, ip_address, details) VALUES (?, ?, ?, ?)",
+        (event,
+         session.get("user_email") or session.get("admin_user", ""),
+         request.remote_addr if request else None,
+         details)
+    )
+    conn.commit()
+    conn.close()
+
+
 def setup_required(f):
     """Redirect to setup wizard if first-run hasn't been completed."""
     @wraps(f)
@@ -486,6 +500,42 @@ def admin_panel():
     return render_template("admin.html", requests=rows, status_filter=status_filter, users=users)
 
 
+@app.route("/admin/activity")
+@user_login_required
+def admin_activity():
+    if not session.get("admin"):
+        abort(403)
+    event_filter = request.args.get("event", "")
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = 50
+
+    conn = get_db()
+    event_types = [r[0] for r in conn.execute(
+        "SELECT DISTINCT event FROM activity_log ORDER BY event"
+    ).fetchall()]
+
+    if event_filter:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM activity_log WHERE event=?", (event_filter,)
+        ).fetchone()[0]
+        logs = conn.execute(
+            "SELECT * FROM activity_log WHERE event=? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (event_filter, per_page, (page - 1) * per_page)
+        ).fetchall()
+    else:
+        total = conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0]
+        logs = conn.execute(
+            "SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (per_page, (page - 1) * per_page)
+        ).fetchall()
+    conn.close()
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return render_template("activity_log.html", logs=logs, total=total,
+                           event_types=event_types, event_filter=event_filter,
+                           page=page, total_pages=total_pages)
+
+
 @app.route("/admin/user/<int:user_id>/toggle", methods=["POST"])
 @login_required
 def admin_toggle_user(user_id):
@@ -668,6 +718,7 @@ def admin_action(req_id):
         send_user_denied(row["email"], full_name, note)
         flash(f"Denied request from {full_name}. Notification sent.", "info")
 
+    log_activity(f"user_{action}", f"{full_name} ({row['email']})")
     return redirect(url_for("admin_panel"))
 
 
@@ -752,6 +803,7 @@ def user_login():
             session["user_name"] = f"{user['first_name']} {user['last_name']}"
             if user["is_admin"]:
                 session["admin"] = True
+            log_activity("login", f"{user['first_name']} {user['last_name']}")
             return redirect(url_for("user_dashboard"))
         else:
             flash("Invalid email or password.", "danger")
@@ -761,6 +813,7 @@ def user_login():
 
 @app.route("/user/logout")
 def user_logout():
+    log_activity("logout")
     session.pop("user_email", None)
     session.pop("user_name", None)
     session.pop("admin", None)
@@ -863,6 +916,7 @@ def cluster_create():
         )
         conn.commit()
         conn.close()
+        log_activity("cluster_deploy", f"{cluster_name} OCP {ocp_version}")
         flash(f"Cluster '{cluster_name}' deployment started (OCP {ocp_version}). You will be notified via email upon successful installation.", "success")
     except Exception as e:
         flash(f"Failed to start deployment: {e}", "danger")
@@ -941,6 +995,7 @@ def cluster_delete():
     subprocess.Popen(["/root/labs/update-motd.sh"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    log_activity("cluster_delete", cluster_name)
     if errors:
         flash(f"Cluster '{cluster_name}' partially deleted. Errors: {'; '.join(errors)}", "warning")
     else:
