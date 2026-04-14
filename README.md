@@ -1,4 +1,4 @@
-# OCP UPI Lab
+# OCP Lab
 
 [![License](https://img.shields.io/badge/license-Internal-red)](.)
 [![OpenShift](https://img.shields.io/badge/OpenShift-4.x-ee0000?logo=redhatopenshift&logoColor=white)](https://docs.openshift.com)
@@ -7,7 +7,7 @@
 [![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask)](.)
 [![PatternFly](https://img.shields.io/badge/PatternFly-5-004080)](https://www.patternfly.org)
 
-A self-service web portal and automation toolkit for deploying and managing OpenShift 4.x UPI clusters on a shared KVM/libvirt host. Users request access, admins approve, and approved users deploy clusters from the browser — DNS, HAProxy, DHCP, VMs, and ignition are all handled automatically.
+A self-service web portal and automation toolkit for deploying and managing OpenShift 4.x clusters on a shared KVM/libvirt host. Supports multiple installation methods (UPI and IPI baremetal) with resource-aware dynamic slot management. Users request access, admins approve, and approved users deploy clusters from the browser — DNS, HAProxy/keepalived, DHCP, VMs, and ignition are all handled automatically.
 
 ## Architecture
 
@@ -33,15 +33,15 @@ A self-service web portal and automation toolkit for deploying and managing Open
                          └──────────────┬───────────────────┘
                                         │ subprocess
                     ┌───────────────────▼────────────────────┐
-                    │         ocp-upi-deploy.sh              │
+                    │   ocp-upi-deploy.sh / ocp-ipi-deploy.sh│
                     │  (detached, survives portal restart)    │
                     └───────────────────┬────────────────────┘
                                         │
           ┌─────────────┬───────────────┼───────────────┬─────────────┐
           ▼             ▼               ▼               ▼             ▼
    ┌────────────┐ ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐
-   │  BIND DNS  │ │ HAProxy  │  │  libvirt   │  │  DHCP    │  │  RHCOS   │
-   │ (named)    │ │ (SNI LB) │  │ (KVM VMs)  │  │ (virsh)  │  │  ISOs    │
+   │  BIND DNS  │ │ HAProxy  │  │  libvirt   │  │  DHCP    │  │  VBMC    │
+   │ (named)    │ │(UPI only)│  │ (KVM VMs)  │  │ (virsh)  │  │(IPI only)│
    └────────────┘ └──────────┘  └────────────┘  └──────────┘  └──────────┘
 ```
 
@@ -91,12 +91,13 @@ sequenceDiagram
 ```
 labs/
 ├── ocp-upi-deploy.sh        # Automated OCP UPI deployment script
+├── ocp-ipi-deploy.sh        # Automated OCP IPI baremetal deployment script
 ├── cluster-infra-setup.sh    # One-time DNS + HAProxy infrastructure setup
 ├── csr-approver.sh           # Auto-approve CSRs until cluster ready (systemd template)
 ├── update-motd.sh            # Dynamic SSH MOTD — shows active clusters + credentials
 ├── labportal/
 │   ├── app.py                # Flask + SocketIO app (routes, auth, terminal, cluster mgmt)
-│   ├── config.py             # Configuration (env vars, cluster slots)
+│   ├── config.py             # Configuration (install types, cluster slots, env vars)
 │   ├── db.py                 # SQLite schema (users, requests, deployments, activity)
 │   ├── mail.py               # SMTP email notifications
 │   ├── requirements.txt      # Python dependencies (flask, flask-socketio)
@@ -118,17 +119,36 @@ labs/
 └── README.md
 ```
 
-## Predefined Cluster Slots
+## Installation Methods
 
-DNS and HAProxy are configured once for all slots — no service restarts needed when deploying or deleting clusters. HAProxy health checks automatically detect backend availability.
+The portal supports multiple installation types. Resource availability (CPU, RAM) is checked before each deployment — deploys are blocked if insufficient resources are available.
 
-| Slot | IP Range | Bootstrap | Masters | Workers | HAProxy Routing |
-|------|----------|-----------|---------|---------|-----------------|
-| `upi1` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | SNI: `*.upi1.example.com` |
-| `upi2` | `.120 – .125` | `.120` | `.121 – .123` | `.124 – .125` | SNI: `*.upi2.example.com` |
-| `upi3` | `.130 – .135` | `.130` | `.131 – .133` | `.134 – .135` | SNI: `*.upi3.example.com` |
+### UPI (User Provisioned Infrastructure)
+
+Pre-configured slots with fixed DNS and HAProxy — no service restarts needed when deploying or deleting clusters.
+
+| Slot | IP Range | Bootstrap | Masters | Workers | Resources |
+|------|----------|-----------|---------|---------|-----------|
+| `upi1` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | 16 vCPUs, 80G RAM |
+| `upi2` | `.120 – .125` | `.120` | `.121 – .123` | `.124 – .125` | 16 vCPUs, 80G RAM |
+| `upi3` | `.130 – .135` | `.130` | `.131 – .133` | `.134 – .135` | 16 vCPUs, 80G RAM |
 
 All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes through HAProxy on `192.168.122.1`.
+
+### IPI (Installer Provisioned Infrastructure — Baremetal)
+
+Dynamic slot allocation — user provides a cluster name, the portal auto-assigns an IP offset from the `140–190` range (blocks of 10). Compact 3-node clusters (masters only, schedulable).
+
+| Component | Details |
+|-----------|---------|
+| Masters | 3 VMs, 8 vCPUs, 32G RAM each (24 vCPUs, 96G total) |
+| VIPs | API VIP = `.offset`, Ingress VIP = `.offset+1` (managed by keepalived on nodes) |
+| Master IPs | `.offset+2` through `.offset+4` |
+| Provisioning | PXE boot via ironic over `provisioning` network (`192.168.0.0/24`) |
+| BMC | VirtualBMC (VBMC) exposes VMs as IPMI endpoints for the installer |
+| DNS | Dynamic records in include files (`/var/named/ipi-forward.include`, `ipi-reverse.include`) |
+| HAProxy | Not needed — IPI uses keepalived VIPs on the nodes |
+| Bootstrap | Created and destroyed automatically by `openshift-install` |
 
 ## Prerequisites
 
@@ -136,14 +156,17 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 |-----------|---------|---------|
 | KVM / libvirt | VM hypervisor | `dnf install -y libvirt qemu-kvm virt-install` |
 | BIND (named) | DNS for cluster domains | `dnf install -y bind bind-utils` |
-| HAProxy | Load balancer (API, ingress) | `dnf install -y haproxy` |
-| coreos-installer | RHCOS ISO customization | `dnf install -y coreos-installer` |
+| HAProxy | Load balancer (UPI API/ingress) | `dnf install -y haproxy` |
+| coreos-installer | RHCOS ISO customization (UPI) | `dnf install -y coreos-installer` |
+| VirtualBMC | IPMI simulation for IPI | `pip install virtualbmc` |
+| ipmitool | VBMC verification | `dnf install -y ipmitool` |
 | Python 3 + Flask + SocketIO | Web portal + terminal | `pip install -r labportal/requirements.txt` |
 | Apache httpd + mod_proxy_wstunnel | Reverse proxy (HTTP + WebSocket) | `dnf install -y httpd mod_proxy_html` |
 
 **Additionally required:**
 - OpenShift pull secret at `/root/pull-secret.txt` ([Get one here](https://console.redhat.com/openshift/install/pull-secret))
 - SSH public key at `~/.ssh/id_ed25519.pub`
+- For IPI: `provisioning` libvirt network (`192.168.0.0/24`) and `vbmcd` service running
 
 ## Setup
 
@@ -217,35 +240,53 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_SMTP_PORT` | `25` | SMTP port |
 | `LABPORTAL_ADMIN_EMAIL` | `admin@example.com` | Admin notification email |
 | `LABPORTAL_FROM_EMAIL` | `labportal@lab.example.com` | Sender address |
-| `LABPORTAL_DEPLOY_SCRIPT` | `/root/ocp-upi-deploy.sh` | Path to deploy script |
+| `LABPORTAL_DEPLOY_SCRIPT` | `/root/labs/ocp-upi-deploy.sh` | Path to UPI deploy script |
+| `LABPORTAL_UPI_SCRIPT` | `/root/labs/ocp-upi-deploy.sh` | UPI deploy script |
+| `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | IPI deploy script |
+
+## Security
+
+The host runs with SELinux **enforcing** at all times. Firewall ports are opened only as needed.
+
+| Aspect | Policy |
+|--------|--------|
+| SELinux | Always enforcing; never set to permissive |
+| Firewall | Default-deny; only required ports are opened per zone |
+| VBMC ports | UDP 6230-6260 opened in `libvirt` zone only (for ironic on provisioning network) |
+| VNC | Bound to `127.0.0.1` only — not exposed to the network |
+| DNS zone files | Owned by `named:named` with `named_zone_t` SELinux context; IPI uses separate include files owned by `root:named` |
+| Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
+| SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity |
 
 ## Usage
 
 ### Deploy a Cluster
 
 1. Log in to the portal
-2. Select an available cluster slot (`upi1`, `upi2`, or `upi3`)
-3. Enter the OCP version (e.g., `4.20.5`)
-4. Click **Deploy Cluster**
-5. Monitor progress via **View Logs**
+2. Select an install type (UPI or IPI Compact)
+3. For UPI: select an available cluster slot; for IPI: enter a cluster name
+4. Enter the OCP version (e.g., `4.20.5`) — version is validated against the OCP mirror
+5. Click **Deploy Cluster** — resource availability is checked before launching
+6. Monitor progress via **View Logs**
 
 ### CLI Deploy (without portal)
 
 ```bash
-# Deploy OCP 4.20.5 in slot upi1 (IP offset 110)
+# UPI: Deploy OCP 4.20.5 in slot upi1 (IP offset 110)
 sudo ./ocp-upi-deploy.sh 4.20.5 upi1 110
 
-# Deploy a second cluster in slot upi2 (IP offset 120)
-sudo ./ocp-upi-deploy.sh 4.20.5 upi2 120
+# IPI: Deploy compact 3-node cluster (IP offset 140)
+sudo ./ocp-ipi-deploy.sh 4.20.5 ipi1 140
 ```
 
 ### Delete a Cluster
 
 Click **Delete Cluster** in the portal dashboard. This will:
 - Destroy and undefine all VMs (`virsh destroy` + `virsh undefine --remove-all-storage`)
+- For IPI: additionally clean up VBMC entries, DHCP reservations, and DNS include records
 - Remove deployment logs
 - Clean up database records
-- Free the slot for reuse
+- Free the slot/offset for reuse
 
 ## Portal Features
 
@@ -258,8 +299,11 @@ Click **Delete Cluster** in the portal dashboard. This will:
 | **Access Requests** | Email domain validation, spam protection (1 request / 24h) |
 | **User Accounts** | Created on admin approval, credentials emailed, enable/disable toggle |
 | **Password Reset** | Self-service forgot password flow via email token |
-| **Cluster Deploy** | One-click deploy from predefined slots, detached process |
-| **Cluster Delete** | Admin: any cluster. Users: only their own. Cleans up VMs, storage, DB records |
+| **Install Types** | UPI (fixed slots, HAProxy) and IPI Compact (dynamic names, VBMC/ironic, keepalived) |
+| **Resource Check** | Validates CPU/RAM availability before deploying; blocks if insufficient |
+| **Version Validation** | Checks OCP version exists on the mirror before starting deployment |
+| **Cluster Deploy** | One-click deploy with install type picker, detached process |
+| **Cluster Delete** | Admin: any cluster. Users: only their own. Cleans up VMs, storage, VBMC, DNS, DB records |
 | **View Logs** | Live log tail (last 200 lines) with auto-refresh during deploy |
 | **CSR Auto-Approver** | Systemd template service (`csr-approver@<cluster>`) auto-approves CSRs until all ClusterOperators are Available or 2-hour timeout |
 | **Dynamic MOTD** | SSH login banner shows active clusters, versions (from live API), credentials, and KUBECONFIG paths |
@@ -268,6 +312,8 @@ Click **Delete Cluster** in the portal dashboard. This will:
 
 ## VM Specifications
 
+### UPI Clusters
+
 | Role | Count | RAM | vCPUs | Disk | VM Name |
 |------|-------|-----|-------|------|---------|
 | Bootstrap | 1 | 32 GB | 8 | 120 GB | `vm-<slot>-bootstrap` |
@@ -275,6 +321,14 @@ Click **Delete Cluster** in the portal dashboard. This will:
 | Worker | 2 | 16 GB | 4 | 120 GB | `vm-<slot>-worker-{0,1}` |
 
 Bootstrap VM is automatically destroyed after bootstrap-complete to reclaim resources.
+
+### IPI Compact Clusters
+
+| Role | Count | RAM | vCPUs | Disk | VM Name |
+|------|-------|-----|-------|------|---------|
+| Master | 3 | 32 GB | 8 | 120 GB | `vm-<name>-master-{0,1,2}` |
+
+Compact 3-node (masters only, schedulable). Bootstrap VM is created and destroyed automatically by `openshift-install`.
 
 ## HAProxy Routing
 
