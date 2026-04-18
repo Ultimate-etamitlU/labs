@@ -18,23 +18,23 @@ A self-service web portal and automation toolkit for deploying and managing Open
                          └──────────────┬───────────────────┘
                                         │ HTTPS + WebSocket
                          ┌──────────────▼───────────────────┐
-                         │     Apache httpd (reverse proxy)  │
+                         │     Apache httpd (reverse proxy) │
                          │   /labs → :5000  (HTTP + WS)     │
                          └──────────────┬───────────────────┘
                                         │
                          ┌──────────────▼───────────────────┐
-                         │   Lab Portal (Flask + SocketIO)   │
+                         │   Lab Portal (Flask + SocketIO)  │
                          │  ┌─────────┐  ┌───────────────┐  │
-                         │  │ SQLite  │  │  SMTP Mailer   │  │
+                         │  │ SQLite  │  │  SMTP Mailer  │  │
                          │  └─────────┘  └───────────────┘  │
-                         │  ┌──────────────────────────────┐ │
-                         │  │  Web Terminal (xterm.js/PTY)  │ │
-                         │  └──────────────────────────────┘ │
+                         │  ┌────────────────────────────┐  │
+                         │  │Web Terminal (xterm.js/PTY) │  │
+                         │  └────────────────────────────┘  │
                          └──────────────┬───────────────────┘
                                         │ subprocess
                     ┌───────────────────▼────────────────────┐
                     │   ocp-upi-deploy.sh / ocp-ipi-deploy.sh│
-                    │  (detached, survives portal restart)    │
+                    │  (detached, survives portal restart)   │
                     └───────────────────┬────────────────────┘
                                         │
           ┌─────────────┬───────────────┼───────────────┬─────────────┐
