@@ -649,6 +649,12 @@ openshift-install create cluster --dir=. --log-level=info
 # --- 7. POST-INSTALL ---
 export KUBECONFIG="$INSTALL_DIR/auth/kubeconfig"
 
+# Grant labusers group read-write access to cluster files (kubeconfig, etc.)
+if getent group labusers &>/dev/null; then
+    setfacl -R -m g:labusers:rwX -m m::rwx "$INSTALL_DIR"
+    setfacl -R -d -m g:labusers:rwX -m m::rwx "$INSTALL_DIR"
+fi
+
 # Update MOTD
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -x "$SCRIPT_DIR/update-motd.sh" ]; then

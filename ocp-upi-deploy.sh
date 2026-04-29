@@ -400,6 +400,12 @@ openshift-install wait-for install-complete --dir=. --log-level=info
 systemctl stop "csr-approver@${CLUSTER_NAME}.service" 2>/dev/null || true
 
 # --- 7. FINAL BANNER ---
+# Grant labusers group read-write access to cluster files (kubeconfig, etc.)
+if getent group labusers &>/dev/null; then
+    setfacl -R -m g:labusers:rwX -m m::rwx "$INSTALL_DIR"
+    setfacl -R -d -m g:labusers:rwX -m m::rwx "$INSTALL_DIR"
+fi
+
 # Update the dynamic MOTD that shows all active clusters
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -x "$SCRIPT_DIR/update-motd.sh" ]; then
