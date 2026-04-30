@@ -168,7 +168,26 @@
                     {% if info.get('description') %}
                     <span class="cluster-badge" style="background:#1a2a1a; color:#92d400; border-color:#3e5622;">{{ info.description }}</span>
                     {% endif %}
+                    {% set res = cluster_reservations.get(cluster_name, {}) %}
+                    {% if res %}
+                    <span class="cluster-badge" style="{% if res.reserved_by == session.get('user_email') %}background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;{% else %}background:rgba(240,171,0,0.12);color:#f0ab00;border-color:rgba(240,171,0,0.3);{% endif %}">
+                        &#x1f512; {{ res.reserved_by.split('@')[0] }}{% if res.purpose %}: {{ res.purpose }}{% endif %}
+                    </span>
+                    <span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;" data-reserved-until="{{ res.reserved_until }}">
+                        <span class="countdown"></span> remaining
+                    </span>
+                    {% endif %}
                     <div class="cluster-actions">
+                        {% if not res %}
+                        <button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;"
+                                onclick="showReserveModal('{{ cluster_name }}')">Reserve</button>
+                        {% elif res.reserved_by == session.get('user_email') or session.get('admin') %}
+                        <form method="post" action="{{ url_for('cluster_release') }}" style="display:inline;"
+                              onsubmit="return confirm('Release your reservation on {{ cluster_name }}?');">
+                            <input type="hidden" name="cluster_name" value="{{ cluster_name }}">
+                            <button type="submit" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;border-color:#f0ab00;color:#f0ab00;">Release</button>
+                        </form>
+                        {% endif %}
                         <a href="{{ url_for('user_terminal', cluster=cluster_name) }}" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">
                             &#x25B6; Terminal
                         </a>
@@ -281,6 +300,44 @@
     </div>
 </div>
 
+<!-- Reserve Cluster Modal -->
+<div id="reserve-modal-backdrop" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; justify-content:center; align-items:center;"
+     onclick="if(event.target===this) closeReserveModal()">
+    <div style="background:#212427; border:1px solid #3c3f42; border-radius:8px; width:420px; max-width:90vw; padding:1.5rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h2 style="margin:0; font-size:1.1rem; color:#f0f0f0;" id="reserve-modal-title">Reserve Cluster</h2>
+            <button onclick="closeReserveModal()" style="background:none; border:none; color:#c7c7c7; font-size:1.5rem; cursor:pointer;">&times;</button>
+        </div>
+        <form method="post" action="{{ url_for('cluster_reserve') }}" id="reserve-form">
+            <input type="hidden" name="cluster_name" id="reserve-cluster-name">
+            <div style="margin-bottom:1rem;">
+                <label style="display:block; font-size:0.85rem; color:#e0e0e0; margin-bottom:0.3rem;">Purpose</label>
+                <input class="pf-v5-c-form-control" type="text" name="purpose" id="reserve-purpose"
+                       placeholder="e.g. Testing OVN upgrade" maxlength="80" style="width:100%;">
+            </div>
+            <div style="margin-bottom:1rem;">
+                <label style="display:block; font-size:0.85rem; color:#e0e0e0; margin-bottom:0.3rem;">Duration</label>
+                <select class="pf-v5-c-form-control" name="duration" id="reserve-duration" onchange="toggleCustomDuration()" style="width:100%;">
+                    <option value="4">4 hours</option>
+                    <option value="8">8 hours</option>
+                    <option value="24" selected>1 day</option>
+                    <option value="48">2 days</option>
+                    <option value="72">3 days</option>
+                    <option value="custom">Custom...</option>
+                </select>
+            </div>
+            <div id="custom-duration-group" style="display:none; margin-bottom:1rem;">
+                <label style="display:block; font-size:0.85rem; color:#e0e0e0; margin-bottom:0.3rem;">Custom (hours, max 168)</label>
+                <input class="pf-v5-c-form-control" type="number" id="custom-duration-input" min="1" max="168" value="12" style="width:100%;">
+            </div>
+            <div style="margin-bottom:0.75rem; padding:0.6rem; background:#292c30; border:1px solid #3c3f42; border-radius:6px; font-size:0.82rem; color:#8a8d90;">
+                Reservations are informational &mdash; they signal to others that you're using the cluster.
+            </div>
+            <button class="pf-v5-c-button pf-m-primary" type="submit" style="width:100%;">Reserve Cluster</button>
+        </form>
+    </div>
+</div>
+
 <script>
 var SSH_USER = "{{ ssh_user }}";
 var HOSTNAME = "{{ hostname }}";
@@ -385,8 +442,57 @@ function closeCliModal() {
     document.getElementById('cli-modal-backdrop').style.display = 'none';
 }
 
+function showReserveModal(clusterName) {
+    document.getElementById('reserve-modal-title').textContent = 'Reserve — ' + clusterName;
+    document.getElementById('reserve-cluster-name').value = clusterName;
+    document.getElementById('reserve-purpose').value = '';
+    document.getElementById('reserve-duration').value = '24';
+    document.getElementById('custom-duration-group').style.display = 'none';
+    document.getElementById('reserve-modal-backdrop').style.display = 'flex';
+}
+
+function closeReserveModal() {
+    document.getElementById('reserve-modal-backdrop').style.display = 'none';
+}
+
+function toggleCustomDuration() {
+    var sel = document.getElementById('reserve-duration');
+    document.getElementById('custom-duration-group').style.display = sel.value === 'custom' ? '' : 'none';
+}
+
+document.getElementById('reserve-form').addEventListener('submit', function(e) {
+    var sel = document.getElementById('reserve-duration');
+    if (sel.value === 'custom') {
+        var custom = document.getElementById('custom-duration-input').value;
+        if (!custom || parseInt(custom) < 1 || parseInt(custom) > 168) {
+            e.preventDefault(); alert('Duration must be between 1 and 168 hours.'); return;
+        }
+        var opt = document.createElement('option');
+        opt.value = custom; opt.selected = true;
+        sel.appendChild(opt);
+    }
+});
+
+function formatCountdown(untilStr) {
+    var until = new Date(untilStr + 'Z');
+    var remaining = Math.max(0, Math.floor((until - new Date()) / 1000));
+    if (remaining <= 0) return 'expired';
+    var h = Math.floor(remaining / 3600);
+    var m = Math.floor((remaining % 3600) / 60);
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+}
+
+function updateCountdowns() {
+    document.querySelectorAll('[data-reserved-until]').forEach(function(el) {
+        var cd = el.querySelector('.countdown');
+        if (cd) cd.textContent = formatCountdown(el.getAttribute('data-reserved-until'));
+    });
+}
+updateCountdowns();
+setInterval(updateCountdowns, 30000);
+
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeCliModal();
+    if (e.key === 'Escape') { closeCliModal(); closeReserveModal(); }
 });
 
 (function() {
@@ -427,11 +533,13 @@ document.addEventListener('keydown', function(e) {
                 let html = '';
                 const versions = data.cluster_versions || {};
                 const cInfo = data.cluster_info || {};
+                const cRes = data.cluster_reservations || {};
                 clusterNames.forEach(name => {
                     const vms = data.clusters[name];
                     const runCount = vms.filter(v => v.state === 'running').length;
                     const badgeClass = runCount === vms.length ? 'badge-ok' : 'badge-warn';
                     const info = cInfo[name] || {};
+                    const rv = cRes[name];
                     html += '<div class="cluster-group"><div class="cluster-header">';
                     html += '<span class="cluster-dot"></span>';
                     html += '<span class="cluster-name">' + name + '</span>';
@@ -445,8 +553,23 @@ document.addEventListener('keydown', function(e) {
                     if (info.description) {
                         html += '<span class="cluster-badge" style="background:#1a2a1a;color:#92d400;border-color:#3e5622;">' + info.description + '</span>';
                     }
+                    if (rv) {
+                        var isMine = rv.reserved_by === CURRENT_USER;
+                        var rStyle = isMine ? 'background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;' : 'background:rgba(240,171,0,0.12);color:#f0ab00;border-color:rgba(240,171,0,0.3);';
+                        var rLabel = rv.reserved_by.split('@')[0];
+                        if (rv.purpose) rLabel += ': ' + rv.purpose;
+                        html += '<span class="cluster-badge" style="' + rStyle + '">&#x1f512; ' + rLabel + '</span>';
+                        html += '<span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;" data-reserved-until="' + rv.reserved_until + '"><span class="countdown"></span> remaining</span>';
+                    }
                     var ver = versions[name] || '';
                     html += '<div class="cluster-actions">';
+                    if (rv) {
+                        if (rv.reserved_by === CURRENT_USER || IS_ADMIN) {
+                            html += '<form method="post" action="/labs/cluster/release" style="display:inline;" onsubmit="return confirm(\'Release reservation on ' + name + '?\');"><input type="hidden" name="cluster_name" value="' + name + '"><button type="submit" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;border-color:#f0ab00;color:#f0ab00;">Release</button></form>';
+                        }
+                    } else {
+                        html += '<button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showReserveModal(\'' + name + '\')">Reserve</button>';
+                    }
                     html += '<a href="/labs/user/terminal?cluster=' + name + '" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">&#x25B6; Terminal</a>';
                     html += '<button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showCliModal(\'' + name + '\', \'' + ver + '\')">CLI Access</button>';
                     html += '<a href="/labs/cluster/logs/' + name + '" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">View Logs</a>';
@@ -470,6 +593,7 @@ document.addEventListener('keydown', function(e) {
                     html += '</div></div>';
                 });
                 container.innerHTML = html;
+                updateCountdowns();
             })
             .catch(() => {});
     }

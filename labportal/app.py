@@ -174,6 +174,35 @@ def get_cluster_info(clusters):
     return info
 
 
+def get_cluster_reservations():
+    """Get active (non-expired) cluster reservations."""
+    conn = get_db()
+    conn.execute("DELETE FROM cluster_reservations WHERE reserved_until < datetime('now')")
+    conn.commit()
+    rows = conn.execute(
+        "SELECT cluster_name, reserved_by, purpose, reserved_until FROM cluster_reservations"
+    ).fetchall()
+    conn.close()
+    return {
+        row["cluster_name"]: {
+            "reserved_by": row["reserved_by"],
+            "purpose": row["purpose"],
+            "reserved_until": row["reserved_until"],
+        }
+        for row in rows
+    }
+
+
+def _write_reservation_file():
+    """Write active reservations to JSON for MOTD script consumption."""
+    reservations = get_cluster_reservations()
+    try:
+        with open("/var/run/cluster-reservations.json", "w") as f:
+            json.dump(reservations, f)
+    except PermissionError:
+        pass
+
+
 def get_cluster_versions(clusters):
     """Get OCP version per cluster — DB first, then fall back to /kvm/clusters/ dirs."""
     import glob
@@ -419,8 +448,10 @@ def api_status():
         clusters_data[name] = cvms
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
+    cluster_reservations = get_cluster_reservations()
     return jsonify(vms=vms, clusters=clusters_data, resources=resources,
-                   cluster_versions=cluster_versions, cluster_info=cluster_info)
+                   cluster_versions=cluster_versions, cluster_info=cluster_info,
+                   cluster_reservations=cluster_reservations)
 
 
 @app.route("/")
@@ -908,6 +939,7 @@ def user_dashboard():
     domain = config.base_domain()
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
+    cluster_reservations = get_cluster_reservations()
     return render_template("user_dashboard.html",
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
@@ -915,7 +947,8 @@ def user_dashboard():
                            install_types=config.INSTALL_TYPES,
                            ssh_user=ssh_user, base_domain=domain,
                            cluster_versions=cluster_versions,
-                           cluster_info=cluster_info)
+                           cluster_info=cluster_info,
+                           cluster_reservations=cluster_reservations)
 
 
 # --- Cluster Management ---
@@ -1194,6 +1227,13 @@ def cluster_delete():
             except Exception as e:
                 errors.append(f"cleanup {cluster_dir}: {e}")
 
+    # Release any reservation on this cluster
+    conn = get_db()
+    conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
+    conn.commit()
+    conn.close()
+    _write_reservation_file()
+
     # Refresh MOTD to reflect the change
     subprocess.Popen(["/root/labs/update-motd.sh"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1204,6 +1244,89 @@ def cluster_delete():
     else:
         flash(f"Cluster '{cluster_name}' deleted successfully.", "success")
 
+    return redirect(url_for("user_dashboard"))
+
+
+@app.route("/cluster/reserve", methods=["POST"])
+@user_login_required
+def cluster_reserve():
+    cluster_name = request.form.get("cluster_name", "").strip()
+    purpose = request.form.get("purpose", "").strip()[:80]
+    duration = request.form.get("duration", "4").strip()
+
+    if not cluster_name:
+        flash("Cluster name is required.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    try:
+        hours = int(duration)
+        if hours < 1 or hours > 168:
+            raise ValueError
+    except ValueError:
+        flash("Invalid duration. Choose 1-168 hours.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    conn = get_db()
+    conn.execute("DELETE FROM cluster_reservations WHERE reserved_until < datetime('now')")
+    existing = conn.execute(
+        "SELECT reserved_by FROM cluster_reservations WHERE cluster_name=?",
+        (cluster_name,)
+    ).fetchone()
+    if existing:
+        conn.close()
+        flash(f"Cluster '{cluster_name}' is already reserved by {existing['reserved_by'].split('@')[0]}.", "warning")
+        return redirect(url_for("user_dashboard"))
+
+    import sqlite3 as _sqlite3
+    try:
+        conn.execute(
+            "INSERT INTO cluster_reservations (cluster_name, reserved_by, purpose, reserved_until) "
+            "VALUES (?, ?, ?, datetime('now', '+' || ? || ' hours'))",
+            (cluster_name, session.get("user_email"), purpose, str(hours))
+        )
+        conn.commit()
+    except _sqlite3.IntegrityError:
+        conn.close()
+        flash(f"Cluster '{cluster_name}' was just reserved by someone else.", "warning")
+        return redirect(url_for("user_dashboard"))
+    conn.close()
+
+    log_activity("cluster_reserve", f"{cluster_name} for {hours}h: {purpose}")
+    _write_reservation_file()
+    flash(f"Cluster '{cluster_name}' reserved for {hours} hours.", "success")
+    return redirect(url_for("user_dashboard"))
+
+
+@app.route("/cluster/release", methods=["POST"])
+@user_login_required
+def cluster_release():
+    cluster_name = request.form.get("cluster_name", "").strip()
+    if not cluster_name:
+        flash("Cluster name is required.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT reserved_by FROM cluster_reservations WHERE cluster_name=?",
+        (cluster_name,)
+    ).fetchone()
+    if not existing:
+        conn.close()
+        flash(f"Cluster '{cluster_name}' is not reserved.", "info")
+        return redirect(url_for("user_dashboard"))
+
+    if existing["reserved_by"] != session.get("user_email") and not session.get("admin"):
+        conn.close()
+        flash("Only the reserver or an admin can release this reservation.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
+    conn.commit()
+    conn.close()
+
+    log_activity("cluster_release", cluster_name)
+    _write_reservation_file()
+    flash(f"Reservation for '{cluster_name}' released.", "success")
     return redirect(url_for("user_dashboard"))
 
 

@@ -8,6 +8,7 @@
 
 CLUSTERS_DIR="/kvm/clusters"
 MOTD_FILE="/etc/motd"
+RESERVATION_FILE="/var/run/cluster-reservations.json"
 
 # Source site config for domain
 if [ -f /etc/ocp-lab.conf ]; then
@@ -83,6 +84,28 @@ fi
             echo "#  Username:   kubeadmin"
             echo "#  Password:   $password"
             echo "#  KUBECONFIG: export KUBECONFIG=$kubeconfig"
+            # Show reservation info if available
+            if [ -f "$RESERVATION_FILE" ]; then
+                res_info=$(python3 -c "
+import json
+try:
+    d = json.load(open('$RESERVATION_FILE'))
+    r = d.get('$cluster_name', {})
+    if r:
+        who = r.get('reserved_by','').split('@')[0]
+        purpose = r.get('purpose','')
+        until = r.get('reserved_until','')[:16]
+        parts = [who]
+        if purpose: parts.append(purpose)
+        parts.append('until ' + until)
+        print(' | '.join(parts))
+except:
+    pass
+" 2>/dev/null)
+                if [ -n "$res_info" ]; then
+                    echo "#  RESERVED:   $res_info"
+                fi
+            fi
         done
     fi
 

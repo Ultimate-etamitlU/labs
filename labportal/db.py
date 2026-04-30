@@ -69,6 +69,15 @@ def init_db():
             log_file TEXT,
             ip_offset INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS cluster_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cluster_name TEXT NOT NULL UNIQUE,
+            reserved_by TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT '',
+            reserved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reserved_until TIMESTAMP NOT NULL
+        );
     """)
 
     # Migrations for existing databases
