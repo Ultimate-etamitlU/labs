@@ -49,7 +49,6 @@ INSTALL_DIR="/kvm/clusters/${CLUSTER_NAME}-${VERSION}"
 MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
 
 # Networking
-BRIDGE_IP="192.168.122.1"
 PROV_BRIDGE="provisioning"
 BM_BRIDGE="virbr0"
 PROV_NET_CIDR="192.168.0.0/24"
@@ -119,14 +118,16 @@ cleanup_ipi() {
 
     # Remove DHCP reservations (masters)
     for i in $(seq 0 $(( NUM_MASTERS - 1 ))); do
-        local bm_mac="52:54:00:${MAC_BASE}:01:$(printf '%02x' $(( 0x11 + i )))"
+        local bm_mac
+        bm_mac="52:54:00:${MAC_BASE}:01:$(printf '%02x' $(( 0x11 + i )))"
         virsh net-update default delete ip-dhcp-host \
             "<host mac='$bm_mac'/>" \
             --live --config 2>/dev/null || true
     done
     # Remove DHCP reservations (workers)
     for i in $(seq 0 $(( NUM_WORKERS - 1 ))); do
-        local bm_mac="52:54:00:${MAC_BASE}:01:$(printf '%02x' $(( 0x21 + i )))"
+        local bm_mac
+        bm_mac="52:54:00:${MAC_BASE}:01:$(printf '%02x' $(( 0x21 + i )))"
         virsh net-update default delete ip-dhcp-host \
             "<host mac='$bm_mac'/>" \
             --live --config 2>/dev/null || true

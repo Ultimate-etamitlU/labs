@@ -21,7 +21,7 @@ KC=$(ls /kvm/clusters/${CLUSTER_NAME}-*/auth/kubeconfig 2>/dev/null | head -1)
 if [ -z "$KC" ]; then
     echo "[csr-approver] No kubeconfig found for ${CLUSTER_NAME}, waiting..."
     # Wait up to 30 min for kubeconfig to appear (cluster is still bootstrapping)
-    for i in $(seq 1 60); do
+    for _i in $(seq 1 60); do
         sleep 30
         KC=$(ls /kvm/clusters/${CLUSTER_NAME}-*/auth/kubeconfig 2>/dev/null | head -1)
         if [ -n "$KC" ]; then

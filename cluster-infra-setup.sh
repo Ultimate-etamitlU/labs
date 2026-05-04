@@ -126,7 +126,7 @@ echo "=== Checking BIND zone declarations ==="
 add_zone_if_missing() {
     local zone_name=$1
     local zone_file=$2
-    local zone_type=$3
+    local _zone_type=$3
 
     if grep -q "\"${zone_name}\"" "$NAMED_ZONES" 2>/dev/null; then
         echo "  Zone '${zone_name}' already declared"
