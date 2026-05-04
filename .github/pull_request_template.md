@@ -5,7 +5,7 @@
 - 
 
 ## Test plan
-- [ ] Tested on BigB lab system
+- [ ] Tested on the lab system
 - [ ] Verified no regressions in existing features
 
 ## Related issue
