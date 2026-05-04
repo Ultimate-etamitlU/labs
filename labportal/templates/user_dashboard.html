@@ -56,6 +56,11 @@
             <span class="resource-label">VMs</span>
             <span class="resource-sub" id="vm-running-count">{{ vms|selectattr('state', 'equalto', 'running')|list|length }} running</span>
         </div>
+        <div class="resource-tile">
+            <div class="resource-big-num" id="deploy-count">{{ total_deployments }}</div>
+            <span class="resource-label">Deployed</span>
+            <span class="resource-sub">clusters to date</span>
+        </div>
         {% endif %}
     </div>
 </div>
@@ -150,7 +155,7 @@
     </div>
     <div id="clusters-container">
         {% if clusters %}
-            {% for cluster_name, cluster_vms in clusters.items() %}
+            {% for cluster_name, cluster_vms in clusters|dictsort %}
             <div class="cluster-group">
                 <div class="cluster-header">
                     <span class="cluster-dot"></span>
@@ -519,13 +524,14 @@ document.addEventListener('keydown', function(e) {
                             '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + ramPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.ram_used + 'G</span></div><span class="resource-label">RAM</span><span class="resource-sub">of ' + res.ram_total + 'G</span></div>' +
                             '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + diskPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.disk_used + '</span></div><span class="resource-label">Storage</span><span class="resource-sub">of ' + res.disk_total + '</span></div>' +
                             '<div class="resource-tile"><div class="resource-ring"><svg viewBox="0 0 36 36"><path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/><path class="ring-fill" stroke-dasharray="' + cpuPct + ', 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg><span class="ring-text">' + res.cpus_used + '</span></div><span class="resource-label">CPUs</span><span class="resource-sub">of ' + res.cpus + '</span></div>' +
-                            '<div class="resource-tile"><div class="resource-big-num">' + data.vms.length + '</div><span class="resource-label">VMs</span><span class="resource-sub">' + running + ' running</span></div>';
+                            '<div class="resource-tile"><div class="resource-big-num">' + data.vms.length + '</div><span class="resource-label">VMs</span><span class="resource-sub">' + running + ' running</span></div>' +
+                            '<div class="resource-tile"><div class="resource-big-num">' + (data.total_deployments || 0) + '</div><span class="resource-label">Deployed</span><span class="resource-sub">clusters to date</span></div>';
                     }
                 }
 
                 // Rebuild clusters
                 const container = document.getElementById('clusters-container');
-                const clusterNames = Object.keys(data.clusters);
+                const clusterNames = Object.keys(data.clusters).sort();
                 if (clusterNames.length === 0) {
                     container.innerHTML = '<div class="empty-clusters"><p>No clusters deployed. Use the form above to deploy one.</p></div>';
                     return;

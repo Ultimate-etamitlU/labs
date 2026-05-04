@@ -448,9 +448,15 @@ def api_status():
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
     cluster_reservations = get_cluster_reservations()
+    conn = get_db()
+    total_deployments = conn.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
+    ).fetchone()[0]
+    conn.close()
     return jsonify(vms=vms, clusters=clusters_data, resources=resources,
                    cluster_versions=cluster_versions, cluster_info=cluster_info,
-                   cluster_reservations=cluster_reservations)
+                   cluster_reservations=cluster_reservations,
+                   total_deployments=total_deployments)
 
 
 @app.route("/")
@@ -787,6 +793,11 @@ def user_dashboard():
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
     cluster_reservations = get_cluster_reservations()
+    conn = get_db()
+    total_deployments = conn.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
+    ).fetchone()[0]
+    conn.close()
     return render_template("user_dashboard.html",
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
@@ -795,7 +806,8 @@ def user_dashboard():
                            ssh_user=ssh_user, base_domain=domain,
                            cluster_versions=cluster_versions,
                            cluster_info=cluster_info,
-                           cluster_reservations=cluster_reservations)
+                           cluster_reservations=cluster_reservations,
+                           total_deployments=total_deployments)
 
 
 # --- Cluster Management ---
