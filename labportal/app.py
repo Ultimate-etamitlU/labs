@@ -185,10 +185,9 @@ def get_cluster_info(clusters):
 def get_cluster_reservations():
     """Get active (non-expired) cluster reservations."""
     conn = get_db()
-    conn.execute("DELETE FROM cluster_reservations WHERE reserved_until < datetime('now')")
-    conn.commit()
     rows = conn.execute(
-        "SELECT cluster_name, reserved_by, purpose, reserved_until FROM cluster_reservations"
+        "SELECT cluster_name, reserved_by, purpose, reserved_until FROM cluster_reservations "
+        "WHERE reserved_until >= datetime('now')"
     ).fetchall()
     conn.close()
     return {
