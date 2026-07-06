@@ -1720,11 +1720,10 @@ def _orphan_bootstrap_reaper():
         time.sleep(600)  # check every 10 minutes
         try:
             # Check if any cluster is actively deploying — bootstrap is expected during install
-            conn = get_db()
-            deploying = conn.execute(
-                "SELECT cluster_name FROM deployments WHERE status='deploying'"
-            ).fetchall()
-            conn.close()
+            with get_db_ctx() as conn:
+                deploying = conn.execute(
+                    "SELECT cluster_name FROM deployments WHERE status='deploying'"
+                ).fetchall()
             deploying_names = {row["cluster_name"] for row in deploying}
 
             result = subprocess.run(["virsh", "list", "--name"],
@@ -1776,13 +1775,12 @@ def _orphan_bootstrap_reaper():
                 except Exception:
                     pass
 
-                conn2 = get_db()
-                conn2.execute(
-                    "INSERT INTO activity_log (event, user_email, ip_address, details) VALUES (?, ?, ?, ?)",
-                    ("bootstrap_auto_cleanup", "system", "127.0.0.1", f"orphan {vm_name} destroyed (running >{BOOTSTRAP_MAX_AGE_SECS // 3600}h)")
-                )
-                conn2.commit()
-                conn2.close()
+                with get_db_ctx() as conn2:
+                    conn2.execute(
+                        "INSERT INTO activity_log (event, user_email, ip_address, details) VALUES (?, ?, ?, ?)",
+                        ("bootstrap_auto_cleanup", "system", "127.0.0.1", f"orphan {vm_name} destroyed (running >{BOOTSTRAP_MAX_AGE_SECS // 3600}h)")
+                    )
+                    conn2.commit()
         except Exception:
             pass
 
