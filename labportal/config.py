@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import socket
 import threading
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -148,12 +149,36 @@ def lab_hostname():
 def storage_dir():
     return get_site("storage_dir", "/kvm")
 
-# CORS — deploy-time, not portal-level; env var like other host constants
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get(
-        "LABPORTAL_CORS_ORIGINS",
-        "https://lab.example.com"
-    ).split(",")
-    if origin.strip()
-]
+def _local_ips():
+    """Detect this machine's non-loopback IPv4 addresses."""
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                ips.add(ip)
+    except socket.gaierror:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0)
+        s.connect(("10.255.255.255", 1))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    return ips
+
+
+def cors_origins():
+    """CORS origins: explicit env override, or auto-detect from local IPs."""
+    explicit = os.environ.get("LABPORTAL_CORS_ORIGINS")
+    if explicit:
+        return [o.strip() for o in explicit.split(",") if o.strip()]
+    origins = set()
+    for ip in _local_ips():
+        origins.add(f"https://{ip}")
+        origins.add(f"http://{ip}")
+    origins.add("https://localhost")
+    origins.add("http://localhost")
+    return list(origins)

@@ -70,7 +70,7 @@ class PrefixMiddleware:
 app.wsgi_app = PrefixMiddleware(app.wsgi_app, prefix="/labs")
 
 socketio = SocketIO(app, path="socket.io",
-                    cors_allowed_origins=config.CORS_ORIGINS,
+                    cors_allowed_origins=config.cors_origins(),
                     async_mode="threading")
 
 # Auto-reap child processes (prevents zombie terminals)
