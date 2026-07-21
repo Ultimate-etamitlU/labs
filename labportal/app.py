@@ -644,14 +644,29 @@ def admin_add_user():
 
         password = generate_password()
         linux_user = derive_linux_username(email)
-        conn.execute(
-            "INSERT INTO users (email, first_name, last_name, linux_username, password_hash, is_active, is_admin, must_change_password) "
-            "VALUES (?, ?, ?, ?, ?, 1, ?, 1)",
-            (email, first_name, last_name, linux_user, hash_password(password), 1 if make_admin else 0)
-        )
-        conn.commit()
 
-    create_linux_user(linux_user, first_name, last_name)
+        # Check linux_username collision (different email, same local part)
+        dup = conn.execute("SELECT email FROM users WHERE linux_username=?", (linux_user,)).fetchone()
+        if dup:
+            flash(f"Linux username '{linux_user}' already taken by {dup['email']}.", "danger")
+            return redirect(url_for("admin_panel"))
+
+        try:
+            conn.execute(
+                "INSERT INTO users (email, first_name, last_name, linux_username, password_hash, is_active, is_admin, must_change_password) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, 1)",
+                (email, first_name, last_name, linux_user, hash_password(password), 1 if make_admin else 0)
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as e:
+            app.logger.error("User insert failed for %s: %s", email, e)
+            flash(f"Could not create user: duplicate entry.", "danger")
+            return redirect(url_for("admin_panel"))
+
+    ok, msg = create_linux_user(linux_user, first_name, last_name)
+    if not ok:
+        app.logger.warning("Linux user creation failed for %s: %s", linux_user, msg)
+
     log_activity("user_created", f"{first_name} {last_name} ({email})")
     flash(f"User {first_name} {last_name} created. Temporary password: {password}", "success")
     return redirect(url_for("admin_panel"))
@@ -881,12 +896,10 @@ def create_linux_user(username, first_name, last_name):
 
     # Ensure labusers group exists
     try:
-        subprocess.run(["getent", "group", "labusers"],
+        subprocess.run(["groupadd", "-f", "labusers"],
                        capture_output=True, timeout=5)
     except Exception:
         pass
-    subprocess.run(["groupadd", "-f", "labusers"],
-                   capture_output=True, timeout=5)
 
     # Check if user already exists
     result = subprocess.run(["id", username], capture_output=True, timeout=5)
@@ -929,6 +942,31 @@ def create_linux_user(username, first_name, last_name):
             ["setfacl", "-R", "-m", f"u:{username}:r-X", sdir],
             capture_output=True, timeout=5
         )
+
+    # Copy cluster SSH key so user can ssh core@<node> without password
+    ssh_key_file = os.environ.get("SSH_KEY_FILE", os.path.expanduser("~/.ssh/id_ed25519"))
+    user_ssh_dir = f"/home/{username}/.ssh"
+    if os.path.isfile(ssh_key_file):
+        try:
+            os.makedirs(user_ssh_dir, mode=0o700, exist_ok=True)
+            user_key = os.path.join(user_ssh_dir, os.path.basename(ssh_key_file))
+            with open(ssh_key_file, "r") as src:
+                key_data = src.read()
+            with open(user_key, "w") as dst:
+                dst.write(key_data)
+            os.chmod(user_key, 0o600)
+            pub_file = ssh_key_file + ".pub"
+            if os.path.isfile(pub_file):
+                user_pub = user_key + ".pub"
+                with open(pub_file, "r") as src:
+                    pub_data = src.read()
+                with open(user_pub, "w") as dst:
+                    dst.write(pub_data)
+                os.chmod(user_pub, 0o644)
+            subprocess.run(["chown", "-R", f"{username}:{username}", user_ssh_dir],
+                           capture_output=True, timeout=5)
+        except Exception as e:
+            errors.append(f"SSH key copy: {e}")
 
     if errors:
         return True, f"User created with warnings: {'; '.join(errors)}"
@@ -1088,6 +1126,16 @@ def user_dashboard():
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
         ).fetchone()[0]
+    with get_db_ctx() as conn:
+        lab_machines = conn.execute(
+            "SELECT id, name, status, specs_json FROM lab_machines WHERE role='peer' AND status='ready'"
+        ).fetchall()
+    lab_machines_list = []
+    for m in lab_machines:
+        specs = json.loads(m["specs_json"]) if m["specs_json"] else {}
+        lab_machines_list.append({"id": m["id"], "name": m["name"],
+                                  "cpus": specs.get("cpus", "?"), "ram_gb": specs.get("ram_gb", "?")})
+
     return render_template("user_dashboard.html",
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
@@ -1097,7 +1145,10 @@ def user_dashboard():
                            cluster_versions=cluster_versions,
                            cluster_info=cluster_info,
                            cluster_reservations=cluster_reservations,
-                           total_deployments=total_deployments)
+                           total_deployments=total_deployments,
+                           lab_machines=lab_machines_list,
+                           sno_slots=sorted(config.SNO_SLOTS.keys()),
+                           sno_install_methods=config.SNO_INSTALL_METHODS)
 
 
 # --- Cluster Management ---
@@ -1160,7 +1211,37 @@ def cluster_create():
     itype = config.INSTALL_TYPES[install_type]
     vms, clusters, _ = get_lab_status()
 
-    if install_type == "upi":
+    machine_id = None
+    install_method = None
+
+    if install_type == "sno":
+        # SNO: validate slot, target machine, install method
+        if cluster_name not in config.SNO_SLOTS:
+            flash(f"Invalid SNO slot '{cluster_name}'. Choose from: {', '.join(sorted(config.SNO_SLOTS))}.", "danger")
+            return redirect(url_for("user_dashboard"))
+        ip_offset = config.SNO_SLOTS[cluster_name]["ip_suffix"]
+        install_method = request.form.get("install_method", "agent-none").strip()
+        if install_method not in config.SNO_INSTALL_METHODS:
+            flash(f"Invalid install method '{install_method}'.", "danger")
+            return redirect(url_for("user_dashboard"))
+        target_machine = request.form.get("target_machine", "").strip()
+        if not target_machine:
+            flash("Target machine is required for SNO deployment.", "danger")
+            return redirect(url_for("user_dashboard"))
+        with get_db_ctx() as conn:
+            machine = conn.execute(
+                "SELECT id, hostname, ssh_user, ssh_port, status FROM lab_machines WHERE id=? AND role='peer'",
+                (target_machine,)
+            ).fetchone()
+        if not machine:
+            flash("Selected target machine not found.", "danger")
+            return redirect(url_for("user_dashboard"))
+        if machine["status"] != "ready":
+            flash(f"Target machine is not ready (status: {machine['status']}).", "danger")
+            return redirect(url_for("user_dashboard"))
+        machine_id = machine["id"]
+
+    elif install_type == "upi":
         # UPI: validate cluster_name is a configured slot
         slots = config.cluster_slots()
         if cluster_name not in slots:
@@ -1244,12 +1325,27 @@ def cluster_create():
                 )
             conn.commit()
 
+        # Store machine_id for SNO deployments
+        if machine_id:
+            with get_db_ctx() as conn:
+                conn.execute("UPDATE deployments SET machine_id=? WHERE cluster_name=? AND status='deploying'",
+                             (machine_id, cluster_name))
+                conn.commit()
+
         # Slot claimed — now start the subprocess
         env = os.environ.copy()
         env["BASE_DOMAIN"] = config.base_domain()
+
+        if install_type == "sno":
+            deploy_args = [deploy_script, ocp_version, cluster_name, machine["hostname"], install_method]
+            env["SSH_USER"] = machine["ssh_user"]
+            env["SSH_PORT"] = str(machine["ssh_port"])
+        else:
+            deploy_args = [deploy_script, ocp_version, cluster_name, str(ip_offset), network_type]
+
         with open(log_file, "w") as log_fd:
             proc = subprocess.Popen(
-                [deploy_script, ocp_version, cluster_name, str(ip_offset), network_type],
+                deploy_args,
                 stdout=log_fd,
                 stderr=subprocess.STDOUT,
                 cwd="/root",
@@ -1298,17 +1394,61 @@ def _destroy_ipi_bootstrap(infra_id, errors=None):
     return errors
 
 
+def _get_machine_ssh_base(machine_id):
+    """Build SSH base command for a remote machine."""
+    with get_db_ctx() as conn:
+        machine = conn.execute("SELECT hostname, ssh_user, ssh_port FROM lab_machines WHERE id=?", (machine_id,)).fetchone()
+    if not machine:
+        return None
+    return ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+            "-p", str(machine["ssh_port"]), f"{machine['ssh_user']}@{machine['hostname']}"]
+
+
 def _delete_cluster_internal(cluster_name, cluster_vms):
     """Delete a cluster's VMs, storage, and DB records. Returns list of errors."""
     with get_db_ctx() as conn:
         dep = conn.execute(
-            "SELECT install_type, ip_offset FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            "SELECT install_type, ip_offset, machine_id FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
             (cluster_name,)
         ).fetchone()
     dep_install_type = dep["install_type"] if dep and dep["install_type"] else "upi"
     dep_ip_offset = dep["ip_offset"] if dep else None
+    dep_machine_id = dep["machine_id"] if dep else None
 
     errors = []
+
+    # SNO: remote cleanup via SSH
+    if dep_install_type == "sno" and dep_machine_id:
+        ssh_base = _get_machine_ssh_base(dep_machine_id)
+        if not ssh_base:
+            errors.append("Remote machine not found in DB")
+        else:
+            vm_name = f"vm-{cluster_name}-master-0"
+            domain = config.base_domain()
+            try:
+                subprocess.run(ssh_base + [f"virsh destroy {vm_name}"],
+                               capture_output=True, timeout=15)
+                subprocess.run(ssh_base + [f"virsh undefine {vm_name} --remove-all-storage"],
+                               capture_output=True, timeout=15)
+            except Exception as e:
+                errors.append(f"Remote VM cleanup: {e}")
+
+            try:
+                node_ip = config.SNO_SLOTS.get(cluster_name, {}).get("ip", "")
+                subprocess.run(ssh_base + [f"/root/labs/sno-infra-update.sh remove {cluster_name} {node_ip} {domain}"],
+                               capture_output=True, timeout=15)
+            except Exception as e:
+                errors.append(f"Remote infra cleanup: {e}")
+
+            try:
+                subprocess.run(ssh_base + [f"rm -rf /kvm/clusters/{cluster_name}-* /kvm/images/{cluster_name}.iso"],
+                               capture_output=True, timeout=15)
+            except Exception as e:
+                errors.append(f"Remote file cleanup: {e}")
+
+        # Skip local VM cleanup for SNO
+        cluster_vms = []
+
     for vm in cluster_vms:
         try:
             subprocess.run(["virsh", "destroy", vm["name"]],
@@ -1452,22 +1592,26 @@ def cluster_delete():
         return redirect(url_for("user_dashboard"))
 
     vms, clusters, _ = get_lab_status()
-    if cluster_name not in clusters:
+
+    # For SNO (remote) clusters, check DB since they won't appear in local virsh
+    with get_db_ctx() as conn:
+        dep_check = conn.execute(
+            "SELECT started_by, install_type FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            (cluster_name,)
+        ).fetchone()
+
+    is_remote = dep_check and dep_check["install_type"] == "sno"
+    if cluster_name not in clusters and not is_remote:
         flash(f"Cluster '{cluster_name}' not found.", "warning")
         return redirect(url_for("user_dashboard"))
 
     # Non-admin users can only delete clusters they created
     if not session.get("admin"):
-        with get_db_ctx() as conn:
-            dep = conn.execute(
-                "SELECT started_by FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
-                (cluster_name,)
-            ).fetchone()
-        if dep and dep["started_by"] != session.get("user_email"):
+        if dep_check and dep_check["started_by"] != session.get("user_email"):
             flash("You can only delete clusters you created.", "danger")
             return redirect(url_for("user_dashboard"))
 
-    errors = _delete_cluster_internal(cluster_name, clusters[cluster_name])
+    errors = _delete_cluster_internal(cluster_name, clusters.get(cluster_name, []))
     log_activity("cluster_delete", cluster_name)
     if errors:
         flash(f"Cluster '{cluster_name}' partially deleted. Errors: {'; '.join(errors)}", "warning")
