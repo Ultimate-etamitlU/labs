@@ -80,7 +80,6 @@ VM_NAME="vm-${CLUSTER_NAME}-master-0"
 
 MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
 REMOTE_CLUSTERS_DIR="/kvm/clusters"
-REMOTE_IMAGES_DIR="/kvm/images"
 REMOTE_TOOLS_DIR="/kvm/client_tools/$VERSION"
 REMOTE_INSTALL_DIR="${REMOTE_CLUSTERS_DIR}/${CLUSTER_NAME}-${VERSION}"
 
