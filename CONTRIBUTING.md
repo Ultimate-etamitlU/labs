@@ -4,18 +4,26 @@ Thanks for your interest in contributing! This guide walks you through the proce
 
 ## Prerequisites
 
-- A [GitHub](https://github.com) account
+- A [GitHub](https://github.com) account with access to this repo
 - Git installed (`dnf install git` or `apt install git`)
 - SSH key added to your GitHub account ([docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh))
 
 ## Workflow
 
-1. **Open an issue first** — Describe what you want to change and why
-2. **Fork the repo** — Click "Fork" on the [repo page](https://github.com/Ultimate-etamitlU/labs)
-3. **Clone, branch, fix, push** — See the example below
-4. **Open a Pull Request** — Link it to your issue
+```
+Issue → Clone → Branch → Fix → Commit → Push → PR → Review → Merge
+```
 
-Never push directly to `main`.
+1. **Open an issue** — Describe what you want to change and why
+2. **Clone the repo** — `git clone git@github.com:Ultimate-etamitlU/labs.git`
+3. **Create a branch** — `git checkout -b fix/short-description`
+4. **Make your change** — Edit the file(s)
+5. **Commit with sign-off** — `git commit -s -m "fix: description"`
+6. **Push your branch** — `git push origin fix/short-description`
+7. **Open a Pull Request** — Link it to your issue with `Closes #N`
+8. **Review** — A maintainer reviews and merges
+
+Never push directly to `main`. Always work on a feature branch.
 
 ## Example: Fixing a Typo
 
@@ -31,12 +39,17 @@ Go to [Issues](https://github.com/Ultimate-etamitlU/labs/issues) and create a ne
 
 Note the issue number (e.g., `#42`).
 
-### Step 2: Fork and Clone
+### Step 2: Clone the Repo
 
 ```bash
-# Fork the repo on GitHub (click the "Fork" button), then clone YOUR fork:
-git clone git@github.com:<your-username>/labs.git
+# First time only — clone the repo:
+git clone git@github.com:Ultimate-etamitlU/labs.git
 cd labs
+
+# If you already have it cloned, just pull latest:
+cd labs
+git checkout main
+git pull origin main
 ```
 
 ### Step 3: Create a Branch
@@ -75,13 +88,18 @@ git push origin fix/readme-typo
 
 ### Step 7: Open a Pull Request
 
-Go to your fork on GitHub. You'll see a banner to create a Pull Request. Click it.
+Go to the [repo on GitHub](https://github.com/Ultimate-etamitlU/labs). You'll see a banner saying your branch was recently pushed — click **"Compare & pull request"**.
 
 The PR template will auto-fill. Fill in:
 - **Summary** — What you changed and why
 - **Related issue** — `Closes #42`
 
 That's it! A maintainer will review and merge your PR.
+
+> **Tip:** You can also create a PR from the command line:
+> ```bash
+> gh pr create --title "fix: correct typo in README.md" --body "Closes #42"
+> ```
 
 ## Commit Conventions
 
