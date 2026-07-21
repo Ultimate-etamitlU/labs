@@ -125,6 +125,12 @@ def init_db():
                          (first, last, row["id"]))
         conn.commit()
 
+    # Drop legacy 'name' column (superseded by first_name/last_name)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "name" in cols:
+        conn.execute("ALTER TABLE users DROP COLUMN name")
+        conn.commit()
+
     try:
         conn.execute("SELECT ip_offset FROM deployments LIMIT 1")
     except sqlite3.OperationalError:

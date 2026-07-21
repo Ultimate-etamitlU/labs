@@ -33,6 +33,25 @@ INSTALL_TYPES = {
         "ram_gb": 128,   # 3×32G + 2×16G
         "requires_slot": False,
     },
+    "sno": {
+        "label": "SNO (Single Node)",
+        "script": os.environ.get("LABPORTAL_SNO_SCRIPT", "/root/labs/ocp-sno-deploy.sh"),
+        "vcpus": 8,
+        "ram_gb": 32,
+        "requires_slot": False,
+        "remote": True,
+    },
+}
+
+SNO_SLOTS = {
+    "sno1": {"ip_suffix": 10, "ip": "192.168.200.10", "mac": "52:54:00:c8:00:10"},
+    "sno2": {"ip_suffix": 20, "ip": "192.168.200.20", "mac": "52:54:00:c8:00:20"},
+}
+
+SNO_INSTALL_METHODS = {
+    "agent-none": "Agent-based (External DNS)",
+    "agent-external": "Agent-based (VIPs)",
+    "upi-bip": "UPI (Bootstrap-in-Place)",
 }
 
 # IPI dynamic IP offset range (blocks of 10)

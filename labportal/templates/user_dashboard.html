@@ -79,7 +79,7 @@
                 <div class="pf-v5-c-form__group-control">
                     <select class="pf-v5-c-form-control" id="install_type" name="install_type" required onchange="toggleInstallType()">
                         {% for key, itype in install_types.items() %}
-                        <option value="{{ key }}" data-vcpus="{{ itype.vcpus }}" data-ram="{{ itype.ram_gb }}" data-slot="{{ itype.requires_slot|int }}">{{ itype.label }}</option>
+                        <option value="{{ key }}" data-vcpus="{{ itype.vcpus }}" data-ram="{{ itype.ram_gb }}" data-slot="{{ itype.requires_slot|int }}" data-remote="{{ itype.get('remote', False)|int }}">{{ itype.label }}</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -118,6 +118,48 @@
                 <div class="pf-v5-c-form__group-control">
                     <input class="pf-v5-c-form-control" type="text" id="cluster_name_input" name="cluster_name_ipi"
                            placeholder="e.g. ipi1, dev" pattern="[a-z0-9][a-z0-9\-]{0,14}" maxlength="15">
+                </div>
+            </div>
+            <!-- SNO: slot dropdown -->
+            <div class="pf-v5-c-form__group" id="sno-slot-group" style="min-width: 100px; display: none;">
+                <label class="pf-v5-c-form__label" for="sno_slot">
+                    <span class="pf-v5-c-form__label-text">SNO Slot</span>
+                </label>
+                <div class="pf-v5-c-form__group-control">
+                    <select class="pf-v5-c-form-control" id="sno_slot" name="cluster_name_sno" disabled>
+                        {% for slot in sno_slots %}
+                        <option value="{{ slot }}">{{ slot }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <!-- SNO: target machine -->
+            <div class="pf-v5-c-form__group" id="machine-group" style="min-width: 140px; display: none;">
+                <label class="pf-v5-c-form__label" for="target_machine">
+                    <span class="pf-v5-c-form__label-text">Target Machine</span>
+                </label>
+                <div class="pf-v5-c-form__group-control">
+                    <select class="pf-v5-c-form-control" id="target_machine" name="target_machine" disabled>
+                        {% for m in lab_machines %}
+                        <option value="{{ m.id }}">{{ m.name }} ({{ m.cpus }} CPUs, {{ m.ram_gb }}G)</option>
+                        {% endfor %}
+                        {% if not lab_machines %}
+                        <option value="" disabled selected>No machines available</option>
+                        {% endif %}
+                    </select>
+                </div>
+            </div>
+            <!-- SNO: install method -->
+            <div class="pf-v5-c-form__group" id="sno-method-group" style="min-width: 180px; display: none;">
+                <label class="pf-v5-c-form__label" for="install_method">
+                    <span class="pf-v5-c-form__label-text">Install Method</span>
+                </label>
+                <div class="pf-v5-c-form__group-control">
+                    <select class="pf-v5-c-form-control" id="install_method" name="install_method" disabled>
+                        {% for key, label in sno_install_methods.items() %}
+                        <option value="{{ key }}">{{ label }}</option>
+                        {% endfor %}
+                    </select>
                 </div>
             </div>
             <div class="pf-v5-c-form__group" style="flex: 1; min-width: 140px;">
@@ -313,29 +355,51 @@ function toggleInstallType() {
     var sel = document.getElementById('install_type');
     var opt = sel.options[sel.selectedIndex];
     var requiresSlot = opt.getAttribute('data-slot') === '1';
+    var isRemote = opt.getAttribute('data-remote') === '1';
+    var isSno = sel.value === 'sno';
     var vcpus = opt.getAttribute('data-vcpus');
     var ram = opt.getAttribute('data-ram');
+
+    // Show/hide slot groups based on type
     document.getElementById('slot-group').style.display = requiresSlot ? '' : 'none';
-    document.getElementById('name-group').style.display = requiresSlot ? 'none' : '';
-    // Toggle required/disabled so only the visible input submits
+    document.getElementById('name-group').style.display = (!requiresSlot && !isSno) ? '' : 'none';
+    document.getElementById('sno-slot-group').style.display = isSno ? '' : 'none';
+    document.getElementById('machine-group').style.display = isSno ? '' : 'none';
+    document.getElementById('sno-method-group').style.display = isSno ? '' : 'none';
+
+    // Toggle disabled so only visible inputs submit
     document.getElementById('cluster_slot').disabled = !requiresSlot;
-    document.getElementById('cluster_name_input').disabled = requiresSlot;
-    document.getElementById('resource-cost').textContent = vcpus + ' vCPUs, ' + ram + 'G RAM';
+    document.getElementById('cluster_name_input').disabled = (requiresSlot || isSno);
+    document.getElementById('sno_slot').disabled = !isSno;
+    document.getElementById('target_machine').disabled = !isSno;
+    document.getElementById('install_method').disabled = !isSno;
+
+    document.getElementById('resource-cost').textContent = vcpus + ' vCPUs, ' + ram + 'G RAM' + (isSno ? ' (remote)' : '');
 }
 
 
-// Fix form: copy IPI name into the real cluster_name field before submit
+// Fix form: copy the correct name field into cluster_name before submit
 document.addEventListener('DOMContentLoaded', function() {
     toggleInstallType();
     document.getElementById('deploy-form').addEventListener('submit', function(e) {
         var sel = document.getElementById('install_type');
         var opt = sel.options[sel.selectedIndex];
         var requiresSlot = opt.getAttribute('data-slot') === '1';
-        if (!requiresSlot) {
-            var nameVal = document.getElementById('cluster_name_input').value.trim();
+        var isSno = sel.value === 'sno';
+
+        // Remove any previously injected hidden field
+        var existing = document.querySelector('input[name="cluster_name"][type="hidden"]');
+        if (existing) existing.remove();
+
+        var nameVal;
+        if (isSno) {
+            nameVal = document.getElementById('sno_slot').value;
+        } else if (!requiresSlot) {
+            nameVal = document.getElementById('cluster_name_input').value.trim();
             if (!nameVal) { e.preventDefault(); alert('Cluster name is required.'); return; }
-            var existing = document.querySelector('input[name="cluster_name"][type="hidden"]');
-            if (existing) existing.remove();
+        }
+
+        if (nameVal) {
             var hidden = document.createElement('input');
             hidden.type = 'hidden'; hidden.name = 'cluster_name'; hidden.value = nameVal;
             this.appendChild(hidden);
