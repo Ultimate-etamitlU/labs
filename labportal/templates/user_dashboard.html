@@ -270,8 +270,8 @@
                 {% set rng = cluster_ranges.get(cluster_name) %}
                 {% if rng %}
                 <div class="cluster-ip-range">
-                    <span class="cluster-ip-range-label">IP range</span>
-                    <span class="cluster-ip-range-value">{{ rng[0] }} – {{ rng[1] }}</span>
+                    <span class="cluster-ip-range-label">{% if rng[0] == rng[1] %}IP{% else %}IP range{% endif %}</span>
+                    <span class="cluster-ip-range-value">{% if rng[0] == rng[1] %}{{ rng[0] }}{% else %}{{ rng[0] }} – {{ rng[1] }}{% endif %}</span>
                 </div>
                 {% endif %}
             </div>
@@ -575,7 +575,8 @@ document.addEventListener('keydown', function(e) {
                     html += '</div>';
                     const rng = clusterRanges[name];
                     if (rng) {
-                        html += '<div class="cluster-ip-range"><span class="cluster-ip-range-label">IP range</span><span class="cluster-ip-range-value">' + rng[0] + ' – ' + rng[1] + '</span></div>';
+                        const single = rng[0] === rng[1];
+                        html += '<div class="cluster-ip-range"><span class="cluster-ip-range-label">' + (single ? 'IP' : 'IP range') + '</span><span class="cluster-ip-range-value">' + (single ? rng[0] : rng[0] + ' – ' + rng[1]) + '</span></div>';
                     }
                     html += '</div>';
                 });
