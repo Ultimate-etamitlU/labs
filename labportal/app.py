@@ -421,7 +421,7 @@ def _poll_remote_machines():
         try:
             with get_db_ctx() as conn:
                 machines = conn.execute(
-                    "SELECT id, name, hostname, ssh_user, ssh_port FROM lab_machines WHERE role='peer' AND status='ready'"
+                    "SELECT id, name, hostname, ssh_user, ssh_port FROM lab_machines WHERE role IN ('peer','boss') AND status='ready'"
                 ).fetchall()
             for m in machines:
                 uri = f"qemu+ssh://{m['ssh_user']}@{m['hostname']}/system"
@@ -1263,7 +1263,7 @@ def user_dashboard():
         ).fetchone()[0]
     with get_db_ctx() as conn:
         lab_machines = conn.execute(
-            "SELECT id, name, status, specs_json FROM lab_machines WHERE role='peer' AND status='ready'"
+            "SELECT id, name, status, specs_json FROM lab_machines WHERE role IN ('peer','boss') AND status='ready'"
         ).fetchall()
     lab_machines_list = []
     for m in lab_machines:
@@ -1368,7 +1368,7 @@ def cluster_create():
             return redirect(url_for("user_dashboard"))
         with get_db_ctx() as conn:
             machine = conn.execute(
-                "SELECT id, hostname, ssh_user, ssh_port, status FROM lab_machines WHERE id=? AND role='peer'",
+                "SELECT id, hostname, ssh_user, ssh_port, status FROM lab_machines WHERE id=? AND role IN ('peer','boss')",
                 (target_machine,)
             ).fetchone()
         if not machine:
