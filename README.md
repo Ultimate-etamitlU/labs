@@ -353,8 +353,8 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 # UPI: Deploy OCP 4.20.5 in slot upi1 (IP offset 110)
 sudo ./ocp-upi-deploy.sh 4.20.5 upi1 110
 
-# IPI: Deploy cluster with 3 masters + 2 workers (IP offset 140)
-sudo ./ocp-ipi-deploy.sh 4.20.5 ipi1 140
+# IPI: Deploy cluster with 3 masters + 2 workers (IP offset 200, slot ipi1)
+sudo ./ocp-ipi-deploy.sh 4.20.5 ipi1 200
 ```
 
 ### Delete a Cluster
