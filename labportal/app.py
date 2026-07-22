@@ -182,6 +182,9 @@ CLUSTER_IP_RANGES = {
     "upi1": ("192.168.122.110", "192.168.122.130"),
     "upi2": ("192.168.122.131", "192.168.122.150"),
     "upi3": ("192.168.122.151", "192.168.122.170"),
+    "ipi1": ("192.168.122.200", "192.168.122.214"),
+    "ipi2": ("192.168.122.215", "192.168.122.229"),
+    "ipi3": ("192.168.122.230", "192.168.122.244"),
 }
 
 
@@ -1176,7 +1179,7 @@ def change_password():
 
 
 def _find_next_ipi_offset(clusters):
-    """Find the next available IPI IP offset (blocks of 10 from 140-190)."""
+    """Find the next available IPI IP offset (blocks of 15 from 200-244)."""
     # Collect used offsets from DB
     with get_db_ctx() as conn:
         rows = conn.execute(
