@@ -179,11 +179,11 @@ def init_db():
         import subprocess as _sp
         specs = {"kvm": True, "libvirt": True}
         try:
-            specs["cpus"] = int(_sp.run(["nproc"], capture_output=True, text=True).stdout.strip())
-            for line in _sp.run(["free", "-g"], capture_output=True, text=True).stdout.splitlines():
+            specs["cpus"] = int(_sp.run(["nproc"], capture_output=True, text=True, timeout=5).stdout.strip())
+            for line in _sp.run(["free", "-g"], capture_output=True, text=True, timeout=5).stdout.splitlines():
                 if line.startswith("Mem:"):
                     specs["ram_gb"] = int(line.split()[1])
-            df = _sp.run(["df", "-BG", "--output=avail", "/kvm"], capture_output=True, text=True)
+            df = _sp.run(["df", "-BG", "--output=avail", "/kvm"], capture_output=True, text=True, timeout=5)
             specs["storage_gb"] = int(df.stdout.strip().splitlines()[-1].strip().rstrip("G"))
         except Exception:
             pass
