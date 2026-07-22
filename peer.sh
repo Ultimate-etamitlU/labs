@@ -2,7 +2,7 @@
 # =============================================================================
 # peer.sh — One-time setup for SNO cluster infrastructure
 #
-# Sets up libvirt, Podman-based dnsmasq + HAProxy, and the snonet network
+# Sets up libvirt, host dnsmasq + Podman HAProxy, and the sno network
 # on a peer remote lab machine for hosting SNO OCP clusters.
 #
 # Usage: ./peer.sh [--domain example.com]
@@ -27,11 +27,10 @@ INFRA_DIR="${STORAGE_DIR}/infra"
 IMAGES_DIR="${STORAGE_DIR}/images"
 CLUSTERS_DIR="${STORAGE_DIR}/clusters"
 
-DNSMASQ_CONF="${INFRA_DIR}/dnsmasq.conf"
+DNSMASQ_CONF="/etc/dnsmasq.d/sno-clusters.conf"
 HAPROXY_CFG="${INFRA_DIR}/haproxy.cfg"
 
 POD_NAME="sno-infra"
-DNSMASQ_CTR="${POD_NAME}-dnsmasq"
 HAPROXY_CTR="${POD_NAME}-haproxy"
 
 # SNO slot definitions
@@ -127,28 +126,20 @@ fi
 log "  Bridge ${BRIDGE_NAME} at ${BRIDGE_IP}"
 log "  DHCP reservations: sno1=${SNO_SUBNET}.10, sno2=${SNO_SUBNET}.20"
 
-# --- Phase 4: Generate dnsmasq config ---
+# --- Phase 4: Host dnsmasq for SNO DNS ---
 log ""
-log "=== Phase 4: dnsmasq configuration ==="
+log "=== Phase 4: Host dnsmasq configuration ==="
+
+dnf install -y dnsmasq &>/dev/null || true
 
 cat > "$DNSMASQ_CONF" << DNSEOF
 ${MANAGED_BY}
-# dnsmasq config for SNO clusters on peer
-# Upstream DNS
-server=8.8.8.8
-server=8.8.4.4
-
-# Listen on all interfaces inside the container
-listen-address=0.0.0.0
+# SNO cluster DNS -- host dnsmasq bound to virbr-sno (no container needed)
+listen-address=${BRIDGE_IP}
 bind-interfaces
-
-# Don't read /etc/resolv.conf
 no-resolv
-
-# Don't read /etc/hosts
 no-hosts
-
-# Log queries for debugging (comment out in production)
+server=127.0.0.53
 log-queries
 
 # Per-cluster DNS records are added/removed dynamically
@@ -157,7 +148,9 @@ log-queries
 # --- Dynamic cluster records ---
 DNSEOF
 
+systemctl enable dnsmasq --now 2>/dev/null || true
 log "  Written: $DNSMASQ_CONF"
+log "  dnsmasq enabled and running on ${BRIDGE_IP}:53"
 
 # --- Phase 5: Generate HAProxy config ---
 log ""
@@ -233,24 +226,12 @@ fi
 log "  Creating pod ${POD_NAME}..."
 podman pod create \
     --name "$POD_NAME" \
-    -p "${BRIDGE_IP}:53:53/udp" \
-    -p "${BRIDGE_IP}:53:53/tcp" \
     -p "0.0.0.0:6443:6443" \
     -p "0.0.0.0:22623:22623" \
     -p "0.0.0.0:443:443" \
     -p "0.0.0.0:80:80"
 
-# dnsmasq container
-log "  Creating dnsmasq container..."
-podman run -d \
-    --name "$DNSMASQ_CTR" \
-    --pod "$POD_NAME" \
-    --cap-add NET_ADMIN \
-    -v "${DNSMASQ_CONF}:/etc/dnsmasq.conf:Z" \
-    quay.io/fedora/fedora-minimal:latest \
-    sh -c 'microdnf install -y dnsmasq && exec dnsmasq --no-daemon --conf-file=/etc/dnsmasq.conf'
-
-# HAProxy container
+# HAProxy container (dnsmasq runs on host, not in pod)
 log "  Creating HAProxy container..."
 podman run -d \
     --name "$HAPROXY_CTR" \
@@ -259,7 +240,7 @@ podman run -d \
     quay.io/fedora/fedora-minimal:latest \
     sh -c 'microdnf install -y haproxy && exec haproxy -f /usr/local/etc/haproxy/haproxy.cfg'
 
-log "  Pod ${POD_NAME} created with dnsmasq + HAProxy"
+log "  Pod ${POD_NAME} created with HAProxy"
 
 # Verify
 log ""
@@ -326,7 +307,7 @@ log "=== Phase 10: Systemd auto-start ==="
 UNIT_DIR="/etc/systemd/system"
 cat > "${UNIT_DIR}/sno-infra.service" << SVCEOF
 [Unit]
-Description=SNO Infrastructure Pod (dnsmasq + HAProxy)
+Description=SNO Infrastructure Pod (HAProxy)
 After=network-online.target libvirtd.service
 Wants=network-online.target
 
@@ -387,7 +368,7 @@ for slot in "${!SNO_SLOTS[@]}"; do
     log "  ${slot}: ${SNO_SUBNET}.${offset}"
 done
 log ""
-log "Infra pod: ${POD_NAME} (dnsmasq + HAProxy)"
+log "Infra pod: ${POD_NAME} (HAProxy)"
 log "Config dir: ${INFRA_DIR}/"
 log "Storage dir: ${STORAGE_DIR}/"
 log ""
