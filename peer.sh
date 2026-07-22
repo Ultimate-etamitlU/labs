@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# karamchari — One-time setup for SNO cluster infrastructure
+# peer.sh — One-time setup for SNO cluster infrastructure
 #
 # Sets up libvirt, Podman-based dnsmasq + HAProxy, and the snonet network
-# on the karamchari remote lab machine for hosting SNO OCP clusters.
+# on a peer remote lab machine for hosting SNO OCP clusters.
 #
-# Usage: ./karamchari-setup.sh [--domain example.com]
+# Usage: ./peer.sh [--domain example.com]
 #
-# Run this ON karamchari (ssh root@karamchari, then execute).
+# Run this ON the peer system (ssh root@<peer>, then execute).
 # =============================================================================
 set -euo pipefail
 
-MANAGED_BY="# Managed by: OCP Lab Portal (karamchari-setup.sh)"
+MANAGED_BY="# Managed by: OCP Lab Portal (peer.sh)"
 DOMAIN="${1:---domain}"
 if [ "$DOMAIN" = "--domain" ]; then
     DOMAIN="${2:-example.com}"
@@ -44,7 +44,7 @@ ts() { date "+%H:%M:%S"; }
 log() { echo "[$(ts)] $*"; }
 die() { echo "[$(ts)] FATAL: $*" >&2; exit 1; }
 
-log "=== karamchari SNO Infrastructure Setup ==="
+log "=== peer SNO Infrastructure Setup ==="
 log "Domain: ${DOMAIN}"
 log "Network: ${SNO_SUBNET}.0/24 (${NETWORK_NAME})"
 log ""
@@ -52,7 +52,7 @@ log ""
 # --- Phase 1: Install packages ---
 log "=== Phase 1: Package installation ==="
 PKGS=()
-for pkg in libvirt qemu-kvm virt-install podman; do
+for pkg in libvirt qemu-kvm virt-install podman nmstate; do
     if ! rpm -q "$pkg" &>/dev/null; then
         PKGS+=("$pkg")
     else
@@ -133,7 +133,7 @@ log "=== Phase 4: dnsmasq configuration ==="
 
 cat > "$DNSMASQ_CONF" << DNSEOF
 ${MANAGED_BY}
-# dnsmasq config for SNO clusters on karamchari
+# dnsmasq config for SNO clusters on peer
 # Upstream DNS
 server=8.8.8.8
 server=8.8.4.4
@@ -165,7 +165,7 @@ log "=== Phase 5: HAProxy configuration ==="
 
 cat > "$HAPROXY_CFG" << HAEOF
 ${MANAGED_BY}
-# HAProxy config for SNO clusters on karamchari
+# HAProxy config for SNO clusters on peer
 global
   log         stdout local0
   maxconn     4000

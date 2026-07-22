@@ -159,8 +159,8 @@ if [ "$REMOTE_CHECK" != "ok" ]; then
         case "$err" in
             no-kvm) log "FAIL: /dev/kvm not found on $TARGET_HOST" ;;
             no-libvirtd) log "FAIL: libvirtd not running on $TARGET_HOST" ;;
-            no-network) log "FAIL: libvirt network '$NETWORK_NAME' not found — run karamchari-setup.sh" ;;
-            no-infra-pod) log "FAIL: sno-infra pod not running — run karamchari-setup.sh" ;;
+            no-network) log "FAIL: libvirt network '$NETWORK_NAME' not found — run peer.sh" ;;
+            no-infra-pod) log "FAIL: sno-infra pod not running — run peer.sh" ;;
             no-virt-install) log "FAIL: virt-install not found on $TARGET_HOST" ;;
             vm-exists) log "FAIL: VM '$VM_NAME' already exists on $TARGET_HOST" ;;
         esac
@@ -283,31 +283,10 @@ hosts:
 - hostname: master-0
   role: master
   interfaces:
-  - name: enp1s0
+  - name: eth0
     macAddress: "${NODE_MAC}"
-  networkConfig:
-    interfaces:
-    - name: enp1s0
-      type: ethernet
-      state: up
-      mac-address: "${NODE_MAC}"
-      ipv4:
-        enabled: true
-        address:
-        - ip: ${NODE_IP}
-          prefix-length: 24
-        dhcp: false
-    dns-resolver:
-      config:
-        server:
-        - ${BRIDGE_IP}
-    routes:
-      config:
-      - destination: 0.0.0.0/0
-        next-hop-address: ${BRIDGE_IP}
-        next-hop-interface: enp1s0
 ACEOF
-        log "  agent-config.yaml written to $TARGET_HOST"
+        log "  agent-config.yaml written to $TARGET_HOST (DHCP via libvirt reservation)"
         ;;
 esac
 log ""
@@ -382,7 +361,7 @@ $SSH_CMD "
         --ram ${SNO_RAM_MB} \
         --vcpus ${SNO_VCPUS} \
         --cpu host-passthrough \
-        --disk size=${SNO_DISK_GB},bus=virtio,format=qcow2,pool=default \
+        --disk size=${SNO_DISK_GB},bus=virtio,format=qcow2,pool=kvm \
         --network network=${NETWORK_NAME},mac=${NODE_MAC} \
         --cdrom ${REMOTE_ISO} \
         --boot hd,cdrom \
