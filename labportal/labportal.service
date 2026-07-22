@@ -9,6 +9,7 @@ WorkingDirectory=/root/labs/labportal
 ExecStart=/usr/bin/python3 /root/labs/labportal/app.py
 Restart=on-failure
 RestartSec=5
+KillMode=process
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
