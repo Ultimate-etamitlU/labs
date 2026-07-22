@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Feedback — Admin{% endblock %}
+{% block content %}
+
+<div class="dash-card">
+    <div class="dash-card-header">
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+            <h2>Feedback</h2>
+            {% if unread_count > 0 %}
+            <span class="stat-pill" style="background:#f0ab00;color:#1b1d21;">{{ unread_count }} unread</span>
+            {% endif %}
+        </div>
+        <a href="{{ url_for('admin_panel') }}" class="admin-action-btn" style="text-decoration:none;">&larr; Admin</a>
+    </div>
+    <div class="dash-card-body" style="padding:0;overflow-x:auto;">
+        {% if feedback_rows %}
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>From</th>
+                    <th>Message</th>
+                    <th>Submitted</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in feedback_rows %}
+                <tr{% if not row.is_read %} style="background:rgba(240,171,0,0.05);"{% endif %}>
+                    <td><code style="color:#73bcf7;font-size:0.85rem;">{{ row.submitted_by }}</code></td>
+                    <td style="max-width:420px;word-break:break-word;font-size:0.875rem;color:#c5c5c5;">
+                        {{ row.message[:240] }}{% if row.message|length > 240 %}&hellip;{% endif %}
+                    </td>
+                    <td style="font-size:0.8rem;color:#8a8d90;white-space:nowrap;">{{ row.submitted_at[:16] }}</td>
+                    <td>
+                        {% if row.is_read %}
+                        <span class="admin-status-badge admin-status-active">Read</span>
+                        {% else %}
+                        <span class="admin-status-badge" style="background:rgba(240,171,0,0.15);color:#f0ab00;border:1px solid rgba(240,171,0,0.3);">Unread</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if not row.is_read %}
+                        <form method="post" action="{{ url_for('admin_feedback_mark_read', feedback_id=row.id) }}">
+                            <button type="submit" class="admin-action-btn admin-btn-enable">Mark read</button>
+                        </form>
+                        {% else %}
+                        <span style="color:#8a8d90;font-size:0.8rem;">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="padding:1.5rem;color:#8a8d90;font-size:0.875rem;">No feedback submitted yet.</p>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}

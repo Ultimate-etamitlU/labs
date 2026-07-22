@@ -80,5 +80,140 @@
     <footer class="portal-footer">
         <p>OCP Lab &mdash; {{ hostname | default('') }}</p>
     </footer>
+
+{% if session.get('user_email') %}
+<button class="feedback-fab" onclick="document.getElementById('feedbackModal').style.display='flex'" title="Feedback / Bug Report">
+    &#128172; Feedback
+</button>
+
+<div id="feedbackModal" class="feedback-modal-backdrop" onclick="if(event.target===this)closeFeedbackModal()">
+    <div class="feedback-modal">
+        <div class="feedback-modal-header">
+            <div class="feedback-tabs">
+                <button class="feedback-tab active" id="tab-feedback" onclick="switchTab('feedback')">Feedback</button>
+                <button class="feedback-tab" id="tab-bug" onclick="switchTab('bug')">Bug Report</button>
+            </div>
+            <button class="feedback-modal-close" onclick="closeFeedbackModal()" title="Close">&times;</button>
+        </div>
+
+        <div id="panel-feedback" class="feedback-panel">
+            <p style="color:#8a8d90;font-size:0.875rem;margin-bottom:1rem;">Share suggestions or general feedback with the lab admins.</p>
+            <form method="post" action="{{ url_for('feedback_submit') }}">
+                <textarea name="message" class="feedback-textarea" maxlength="2000"
+                          placeholder="What's on your mind?" required></textarea>
+                <div style="display:flex;justify-content:flex-end;margin-top:0.75rem;">
+                    <button type="submit" class="pf-v5-c-button pf-m-primary" style="font-size:0.875rem;">Submit</button>
+                </div>
+            </form>
+        </div>
+
+        <div id="panel-bug" class="feedback-panel" style="display:none;">
+            <p style="color:#8a8d90;font-size:0.875rem;margin-bottom:1rem;">Found a bug? Open an issue on GitHub — it'll be tracked and prioritised by the team.</p>
+            <a href="https://github.com/Ultimate-etamitlU/labs/issues/new" target="_blank" rel="noopener"
+               class="pf-v5-c-button pf-m-danger" style="font-size:0.875rem;display:inline-block;">
+                &#128027; Open GitHub Issue
+            </a>
+        </div>
+    </div>
+</div>
+
+<style>
+.feedback-fab {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    background: #06c;
+    color: #fff;
+    border: none;
+    border-radius: 2rem;
+    padding: 0.55rem 1.1rem;
+    font-size: 0.875rem;
+    font-family: inherit;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    z-index: 900;
+    transition: background 0.15s;
+}
+.feedback-fab:hover { background: #004e8c; }
+
+.feedback-modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+.feedback-modal {
+    background: #1b1d21;
+    border: 1px solid #3c3f42;
+    border-radius: 0.5rem;
+    width: min(480px, 92vw);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.feedback-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem 0;
+    border-bottom: 1px solid #3c3f42;
+}
+.feedback-tabs { display: flex; gap: 0; }
+.feedback-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #8a8d90;
+    font-family: inherit;
+    font-size: 0.875rem;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.feedback-tab.active { color: #e0e0e0; border-bottom-color: #06c; }
+.feedback-tab:hover:not(.active) { color: #c5c5c5; }
+.feedback-modal-close {
+    background: none;
+    border: none;
+    color: #8a8d90;
+    font-size: 1.25rem;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0.25rem 0.5rem;
+}
+.feedback-modal-close:hover { color: #e0e0e0; }
+.feedback-panel { padding: 1.25rem 1rem; }
+.feedback-textarea {
+    width: 100%;
+    min-height: 120px;
+    background: #0f1214;
+    border: 1px solid #3c3f42;
+    border-radius: 0.25rem;
+    color: #e0e0e0;
+    font-family: inherit;
+    font-size: 0.875rem;
+    padding: 0.5rem 0.75rem;
+    resize: vertical;
+    box-sizing: border-box;
+}
+.feedback-textarea:focus { outline: 1px solid #06c; border-color: #06c; }
+</style>
+
+<script>
+function closeFeedbackModal() {
+    document.getElementById('feedbackModal').style.display = 'none';
+}
+function switchTab(name) {
+    document.getElementById('panel-feedback').style.display = name === 'feedback' ? '' : 'none';
+    document.getElementById('panel-bug').style.display = name === 'bug' ? '' : 'none';
+    document.getElementById('tab-feedback').classList.toggle('active', name === 'feedback');
+    document.getElementById('tab-bug').classList.toggle('active', name === 'bug');
+}
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeFeedbackModal();
+});
+</script>
+{% endif %}
 </body>
 </html>
