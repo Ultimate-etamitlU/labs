@@ -44,6 +44,15 @@ _ph = PasswordHasher()
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
 
+# --- Session cookie hardening ---
+# Secure defaults; opt out only for local http dev via LABPORTAL_INSECURE_COOKIES=1.
+_insecure_cookies = os.environ.get("LABPORTAL_INSECURE_COOKIES") == "1"
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=not _insecure_cookies,
+    SESSION_COOKIE_SAMESITE="Strict",
+)
+
 
 @app.context_processor
 def inject_globals():
@@ -128,6 +137,21 @@ def validate_email(email):
         domains_str = ", ".join(f"@{d}" for d in sorted(allowed))
         return False, f"Only {domains_str} email addresses are accepted."
     return True, email
+
+
+# --- Input validation ---
+# Allowlist patterns applied at request boundaries before any value reaches a
+# subprocess, file path, or shell string. Reject-by-default.
+_RE_CLUSTER_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
+_RE_OCP_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def valid_cluster_name(name):
+    return bool(name) and _RE_CLUSTER_NAME.match(name) is not None
+
+
+def valid_ocp_version(version):
+    return bool(version) and _RE_OCP_VERSION.match(version) is not None
 
 
 def login_required(admin_only=False):
@@ -446,8 +470,8 @@ def _poll_remote_machines():
                         _remote_vm_cache[m["name"]] = remote_vms
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            app.logger.error("remote machine poll error: %s", e)
         time.sleep(30)
 
 
@@ -574,7 +598,7 @@ def setup():
             conn.commit()
 
         flash("Setup complete! You can now log in as admin.", "success")
-        return redirect(url_for("login"))
+        return redirect(url_for("user_login"))
 
     # GET — show setup form with defaults
     return render_template("setup.html", errors=[],
@@ -589,7 +613,13 @@ def setup():
 
 @app.route("/api/status")
 def api_status():
-    """JSON endpoint for live dashboard updates."""
+    """JSON endpoint for live dashboard updates.
+
+    Intentionally public: mirrors the anonymous landing dashboard (index), which
+    already server-renders the same VM/cluster status. See the email-exposure
+    follow-up before adding auth here — gating this alone breaks the public page
+    without closing anything.
+    """
     vms, clusters, resources = get_lab_status()
     clusters_data = {}
     for name, cvms in clusters.items():
@@ -676,10 +706,8 @@ def admin_panel():
 
 
 @app.route("/admin/activity")
-@login_required
+@login_required(admin_only=True)
 def admin_activity():
-    if not session.get("admin"):
-        abort(403)
     event_filter = request.args.get("event", "")
     page = max(1, request.args.get("page", 1, type=int))
     per_page = 50
@@ -1181,6 +1209,9 @@ def user_login():
                         (hash_password(password), user["id"])
                     )
                     rehash_conn.commit()
+            # Prevent session fixation: drop any pre-login session contents,
+            # then issue a fresh session for the authenticated identity.
+            session.clear()
             session["user_email"] = user["email"]
             session["user_name"] = f"{user['first_name']} {user['last_name']}"
             if user["is_admin"]:
@@ -1246,7 +1277,18 @@ def change_password():
                 (hash_password(password), session["user_email"])
             )
             conn.commit()
-        session.pop("force_password_change", None)
+        # Rotate the session after a credential change: preserve identity but
+        # reissue the cookie so the pre-change session contents are replaced.
+        # (Sessions are signed client-side cookies — there is no server-side
+        # store to revoke, so this rotates rather than remotely invalidates.)
+        email = session.get("user_email")
+        name = session.get("user_name")
+        is_admin = session.get("admin")
+        session.clear()
+        session["user_email"] = email
+        session["user_name"] = name
+        if is_admin:
+            session["admin"] = True
         log_activity("password_changed", "User set own password")
         flash("Password updated successfully.", "success")
         return redirect(url_for("user_dashboard"))
@@ -1375,6 +1417,10 @@ def cluster_create():
 
     if not cluster_name or not ocp_version:
         flash("Cluster name and OCP version are required.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    if not valid_ocp_version(ocp_version):
+        flash("OCP version must look like X.Y.Z (e.g. 4.19.22).", "danger")
         return redirect(url_for("user_dashboard"))
 
     needs_extension = reservation_hours_raw == "extend"
@@ -1550,7 +1596,22 @@ def cluster_create():
             life_msg += " (extension request sent to admin)"
         flash(f"Cluster '{cluster_name}' ({itype['label']}) deployment started (OCP {ocp_version}), {life_msg}.", "success")
     except Exception as e:
-        flash(f"Failed to start deployment: {e}", "danger")
+        # Deploy kickoff failed after the slot was claimed — release the
+        # reservation and drop the stuck 'deploying' row so the slot frees up.
+        app.logger.error("Deploy kickoff failed for %s: %s", cluster_name, e)
+        try:
+            with get_db_ctx() as conn:
+                conn.execute(
+                    "DELETE FROM deployments WHERE cluster_name=? AND status='deploying'",
+                    (cluster_name,))
+                conn.execute(
+                    "DELETE FROM cluster_reservations WHERE cluster_name=?",
+                    (cluster_name,))
+                conn.commit()
+            _write_reservation_file()
+        except Exception as cleanup_err:
+            app.logger.error("Slot cleanup after failed deploy of %s: %s", cluster_name, cleanup_err)
+        flash("Failed to start deployment. The slot has been released; please try again.", "danger")
 
     return redirect(url_for("user_dashboard"))
 
@@ -1777,6 +1838,8 @@ def cluster_delete():
     if not cluster_name:
         flash("Cluster name is required.", "danger")
         return redirect(url_for("user_dashboard"))
+    if not valid_cluster_name(cluster_name):
+        abort(400)
 
     vms, clusters, _ = get_lab_status()
 
@@ -1811,9 +1874,10 @@ def cluster_delete():
 
 
 @app.route("/cluster/logs/<cluster_name>")
+@login_required
 def cluster_logs(cluster_name):
-    if not session.get("user_email") and not session.get("admin"):
-        return redirect(url_for("user_login"))
+    if not valid_cluster_name(cluster_name):
+        abort(400)
     with get_db_ctx() as conn:
         dep = conn.execute(
             "SELECT * FROM deployments WHERE cluster_name=? ORDER BY started_at DESC LIMIT 1",
@@ -2063,8 +2127,8 @@ def _cluster_lifetime_reaper():
                         conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (name,))
                         conn.execute("DELETE FROM deployments WHERE cluster_name=?", (name,))
                         conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            app.logger.error("lifetime_reaper error: %s", e)
 
 
 def _orphan_bootstrap_reaper():
@@ -2139,14 +2203,61 @@ def _orphan_bootstrap_reaper():
                         ("bootstrap_auto_cleanup", "system", "127.0.0.1", f"orphan {vm_name} destroyed (running >{BOOTSTRAP_MAX_AGE_SECS // 3600}h)")
                     )
                     conn2.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            app.logger.error("orphan_bootstrap_reaper error: %s", e)
+
+
+DEPLOY_MAX_AGE_SECS = int(os.environ.get("LABPORTAL_DEPLOY_MAX_AGE", "5400"))  # 90 min
+
+
+def _deploy_watchdog():
+    """Kill deploy scripts that run past the max duration and free their slot.
+
+    Guards against a deploy that hangs mid-way, which would otherwise leave the
+    row stuck in 'deploying' and the slot occupied until its reservation expires.
+    """
+    while True:
+        time.sleep(300)
+        try:
+            with get_db_ctx() as conn:
+                stuck = conn.execute(
+                    "SELECT cluster_name, pid FROM deployments "
+                    "WHERE status='deploying' "
+                    "AND started_at < datetime('now', '-' || ? || ' seconds')",
+                    (str(DEPLOY_MAX_AGE_SECS),)
+                ).fetchall()
+            for row in stuck:
+                name = row["cluster_name"]
+                pid = row["pid"]
+                if pid:
+                    # Deploy runs in its own session (start_new_session=True);
+                    # signal the whole process group.
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    except (OSError, ProcessLookupError):
+                        pass
+                with get_db_ctx() as conn:
+                    conn.execute(
+                        "UPDATE deployments SET status='failed', finished_at=datetime('now') "
+                        "WHERE cluster_name=? AND status='deploying'", (name,))
+                    conn.execute(
+                        "DELETE FROM cluster_reservations WHERE cluster_name=?", (name,))
+                    conn.execute(
+                        "INSERT INTO activity_log (event, user_email, ip_address, details) "
+                        "VALUES (?, ?, ?, ?)",
+                        ("deploy_timeout", "system", "127.0.0.1",
+                         f"{name} killed after >{DEPLOY_MAX_AGE_SECS // 60}min"))
+                    conn.commit()
+                _write_reservation_file()
+        except Exception as e:
+            app.logger.error("deploy_watchdog error: %s", e)
 
 
 # Start the reaper threads
 threading.Thread(target=_terminal_reaper, daemon=True).start()
 threading.Thread(target=_cluster_lifetime_reaper, daemon=True).start()
 threading.Thread(target=_orphan_bootstrap_reaper, daemon=True).start()
+threading.Thread(target=_deploy_watchdog, daemon=True).start()
 
 
 # --- CLI ---
