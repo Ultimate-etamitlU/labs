@@ -2,7 +2,7 @@
 # =============================================================================
 # sno-infra-update.sh — Dynamically add/remove SNO cluster DNS + HAProxy records
 #
-# Runs ON karamchari. Called via SSH by the deploy/delete scripts.
+# Runs ON the peer system. Called via SSH by the deploy/delete scripts.
 # Uses marked blocks (SNO-START/SNO-END) for clean add/remove operations.
 #
 # Usage:
