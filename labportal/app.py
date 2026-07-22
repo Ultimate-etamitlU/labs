@@ -189,7 +189,8 @@ CLUSTER_IP_RANGES = {
 
 
 def get_dhcp_host_map():
-    """Parse virsh net-dumpxml default to map VM names to static DHCP IPs."""
+    """Map VM names to IPs: local virsh DHCP for UPI/IPI, static config for SNO."""
+    mapping = {}
     try:
         import xml.etree.ElementTree as ET
         result = subprocess.run(
@@ -197,7 +198,6 @@ def get_dhcp_host_map():
             capture_output=True, text=True, timeout=5
         )
         root = ET.fromstring(result.stdout)
-        mapping = {}
         for host in root.findall(".//dhcp/host"):
             name = host.get("name", "")
             ip = host.get("ip", "")
@@ -207,9 +207,23 @@ def get_dhcp_host_map():
             parts = name.split(".")
             if len(parts) >= 2:
                 mapping[f"vm-{parts[1]}-{parts[0]}"] = ip
-        return mapping
     except Exception:
-        return {}
+        pass
+
+    # SNO VMs use static IPs from config — no virsh query needed
+    try:
+        with get_db_ctx() as conn:
+            sno_deps = conn.execute(
+                "SELECT cluster_name FROM deployments WHERE install_type='sno' AND status IN ('deploying','completed')"
+            ).fetchall()
+        for dep in sno_deps:
+            slot = config.SNO_SLOTS.get(dep["cluster_name"])
+            if slot:
+                mapping[f"vm-{dep['cluster_name']}-master-0"] = slot["ip"]
+    except Exception:
+        pass
+
+    return mapping
 
 
 def get_cluster_info(clusters):
