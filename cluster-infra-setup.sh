@@ -33,7 +33,7 @@ DOMAIN="${BASE_DOMAIN:-example.com}"
 
 # Parse CLUSTER_SLOTS (format: "name1:offset1 name2:offset2 ...")
 # Fall back to defaults if not set
-CLUSTER_SLOTS="${CLUSTER_SLOTS:-cluster1:110 cluster2:120 cluster3:130}"
+CLUSTER_SLOTS="${CLUSTER_SLOTS:-upi1:110 upi2:131 upi3:151}"
 
 declare -A CLUSTERS=()
 CLUSTER_ORDER=()
@@ -477,6 +477,41 @@ if command -v httpd &>/dev/null; then
     fi
 else
     echo "  httpd not installed — skipping"
+fi
+
+# Configure static DHCP reservations for all fixed UPI slots.
+# MAC formula must match ocp-upi-deploy.sh: 52:54:00:<hex(offset)>:00:<node_suffix>
+echo ""
+echo "=== Configuring DHCP reservations ==="
+if ! virsh net-info default &>/dev/null; then
+    echo "  WARN: libvirt 'default' network not found — skipping DHCP setup"
+else
+    for cname in "${CLUSTER_ORDER[@]}"; do
+        offset=${CLUSTERS[$cname]}
+        mac_base=$(printf "%02x" "$offset")
+        echo "  $cname (offset $offset, MAC base 52:54:00:${mac_base}):"
+        declare -a _NODES=(
+            "bootstrap:0:10"
+            "master-0:1:11"
+            "master-1:2:12"
+            "master-2:3:13"
+            "worker-0:4:14"
+            "worker-1:5:15"
+        )
+        for node_entry in "${_NODES[@]}"; do
+            IFS=: read -r role ip_delta mac_suffix <<< "$node_entry"
+            ip="${SUBNET}.$((offset + ip_delta))"
+            mac="52:54:00:${mac_base}:00:${mac_suffix}"
+            hostname="${role}.${cname}.${DOMAIN}"
+            # Delete first (idempotent), then add
+            virsh net-update default delete ip-dhcp-host \
+                "<host mac='${mac}'/>" --live --config 2>/dev/null || true
+            virsh net-update default add ip-dhcp-host \
+                "<host mac='${mac}' name='${hostname}' ip='${ip}'/>" \
+                --live --config
+            echo "    ${mac} -> ${ip} (${hostname})"
+        done
+    done
 fi
 
 # Reload services
