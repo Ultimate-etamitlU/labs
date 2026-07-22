@@ -16,11 +16,10 @@
 set -euo pipefail
 
 INFRA_DIR="/kvm/infra"
-DNSMASQ_CONF="${INFRA_DIR}/dnsmasq.conf"
+DNSMASQ_CONF="/etc/dnsmasq.d/sno-clusters.conf"
 HAPROXY_CFG="${INFRA_DIR}/haproxy.cfg"
 
 POD_NAME="sno-infra"
-DNSMASQ_CTR="${POD_NAME}-dnsmasq"
 HAPROXY_CTR="${POD_NAME}-haproxy"
 
 ACTION="${1:?Usage: $0 add|remove <cluster> <node_ip> <domain> [haproxy]}"
@@ -140,12 +139,12 @@ remove_haproxy_blocks() {
     fi
 }
 
-restart_containers() {
-    podman restart "$DNSMASQ_CTR" 2>/dev/null || log "  WARN: dnsmasq restart failed"
+restart_infra() {
+    systemctl reload dnsmasq 2>/dev/null || log "  WARN: dnsmasq reload failed"
     if [ "$HAPROXY_MODE" = "yes" ] || [ "$ACTION" = "remove" ]; then
         podman restart "$HAPROXY_CTR" 2>/dev/null || log "  WARN: HAProxy restart failed"
     fi
-    log "  Containers restarted"
+    log "  Infra reloaded"
 }
 
 case "$ACTION" in
@@ -155,14 +154,14 @@ case "$ACTION" in
         if [ "$HAPROXY_MODE" = "yes" ]; then
             add_haproxy
         fi
-        restart_containers
+        restart_infra
         log "Done — ${CLUSTER} infra ready"
         ;;
     remove)
         log "Removing ${CLUSTER}"
         remove_block "$DNSMASQ_CONF"
         remove_haproxy_blocks
-        restart_containers
+        restart_infra
         log "Done — ${CLUSTER} infra cleaned"
         ;;
     *)

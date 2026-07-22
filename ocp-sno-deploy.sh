@@ -80,6 +80,7 @@ VM_NAME="vm-${CLUSTER_NAME}-master-0"
 
 MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
 REMOTE_CLUSTERS_DIR="/kvm/clusters"
+REMOTE_IMAGES_DIR="/kvm/images"
 REMOTE_TOOLS_DIR="/kvm/client_tools/$VERSION"
 REMOTE_INSTALL_DIR="${REMOTE_CLUSTERS_DIR}/${CLUSTER_NAME}-${VERSION}"
 
@@ -159,8 +160,8 @@ if [ "$REMOTE_CHECK" != "ok" ]; then
         case "$err" in
             no-kvm) log "FAIL: /dev/kvm not found on $TARGET_HOST" ;;
             no-libvirtd) log "FAIL: libvirtd not running on $TARGET_HOST" ;;
-            no-network) log "FAIL: libvirt network '$NETWORK_NAME' not found — run peer.sh" ;;
-            no-infra-pod) log "FAIL: sno-infra pod not running — run peer.sh" ;;
+            no-network) log "FAIL: libvirt network '$NETWORK_NAME' not found — run karamchari-setup.sh" ;;
+            no-infra-pod) log "FAIL: sno-infra pod not running — run karamchari-setup.sh" ;;
             no-virt-install) log "FAIL: virt-install not found on $TARGET_HOST" ;;
             vm-exists) log "FAIL: VM '$VM_NAME' already exists on $TARGET_HOST" ;;
         esac
@@ -220,6 +221,12 @@ log "=== Step 2: Generate install configs ==="
 
 PULL_SECRET=$(cat "$PULL_SECRET_FILE")
 SSH_KEY=$(cat "$SSH_KEY_FILE")
+# PEER_SSH_PUBKEY: portal passes the peer machine's stored pubkey so core@ is
+# accessible from the peer itself. Only set for peer deploys (this script).
+if [ -n "${PEER_SSH_PUBKEY:-}" ] && [ "$PEER_SSH_PUBKEY" != "$SSH_KEY" ]; then
+    SSH_KEY="${SSH_KEY}
+${PEER_SSH_PUBKEY}"
+fi
 
 case "$INSTALL_METHOD" in
     agent-none)
@@ -263,7 +270,8 @@ controlPlane:
 platform:
 ${PLATFORM_YAML}
 pullSecret: '${PULL_SECRET}'
-sshKey: '${SSH_KEY}'
+sshKey: |
+$(echo "${SSH_KEY}" | sed 's/^/  /')
 ICEOF
 
 # Backup
@@ -285,8 +293,28 @@ hosts:
   interfaces:
   - name: eth0
     macAddress: "${NODE_MAC}"
+  networkConfig:
+    interfaces:
+    - name: eth0
+      type: ethernet
+      state: up
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: ${NODE_IP}
+          prefix-length: 24
+    dns-resolver:
+      config:
+        server:
+        - ${BRIDGE_IP}
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: ${BRIDGE_IP}
+        next-hop-interface: eth0
 ACEOF
-        log "  agent-config.yaml written to $TARGET_HOST (DHCP via libvirt reservation)"
+        log "  agent-config.yaml written to $TARGET_HOST (static IP: ${NODE_IP}, DNS: ${BRIDGE_IP})"
         ;;
 esac
 log ""
