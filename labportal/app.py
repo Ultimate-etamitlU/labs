@@ -178,6 +178,37 @@ def generate_password(length=12):
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+CLUSTER_IP_RANGES = {
+    "upi1": ("192.168.122.110", "192.168.122.130"),
+    "upi2": ("192.168.122.131", "192.168.122.150"),
+    "upi3": ("192.168.122.151", "192.168.122.170"),
+}
+
+
+def get_dhcp_host_map():
+    """Parse virsh net-dumpxml default to map VM names to static DHCP IPs."""
+    try:
+        import xml.etree.ElementTree as ET
+        result = subprocess.run(
+            ["virsh", "net-dumpxml", "default"],
+            capture_output=True, text=True, timeout=5
+        )
+        root = ET.fromstring(result.stdout)
+        mapping = {}
+        for host in root.findall(".//dhcp/host"):
+            name = host.get("name", "")
+            ip = host.get("ip", "")
+            if not name or not ip:
+                continue
+            # "master-0.upi1.example.com" -> "vm-upi1-master-0"
+            parts = name.split(".")
+            if len(parts) >= 2:
+                mapping[f"vm-{parts[1]}-{parts[0]}"] = ip
+        return mapping
+    except Exception:
+        return {}
+
+
 def get_cluster_info(clusters):
     """Get deployment metadata (creator, description, install_type) per cluster from DB."""
     with get_db_ctx() as conn:
@@ -340,7 +371,77 @@ def get_lab_status():
     except Exception:
         pass
 
+    # Merge remote (SNO) clusters from cache
+    for machine_name, remote_vms in _remote_vm_cache.items():
+        for vm in remote_vms:
+            vms.append(vm)
+            name = vm["name"]
+            cluster = name
+            if name.startswith("vm-"):
+                stripped = name[3:]
+                for suffix in ("-master-0", "-bootstrap"):
+                    if stripped.endswith(suffix):
+                        cluster = stripped[: -len(suffix)]
+                        break
+                else:
+                    cluster = stripped
+            if cluster not in clusters:
+                clusters[cluster] = []
+            clusters[cluster].append(vm)
+
     return vms, clusters, resources
+
+
+# --- Remote VM status cache (polled every 30s) ---
+_remote_vm_cache = {}
+_remote_poll_lock = threading.Lock()
+
+
+def _poll_remote_machines():
+    while True:
+        try:
+            with get_db_ctx() as conn:
+                machines = conn.execute(
+                    "SELECT id, name, hostname, ssh_user, ssh_port FROM lab_machines WHERE role='peer' AND status='ready'"
+                ).fetchall()
+            for m in machines:
+                uri = f"qemu+ssh://{m['ssh_user']}@{m['hostname']}/system"
+                try:
+                    result = subprocess.run(
+                        ["virsh", "-c", uri, "list", "--all"],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    remote_vms = []
+                    for line in result.stdout.strip().split("\n")[2:]:
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            remote_vms.append({
+                                "id": parts[0] if parts[0] != "-" else "-",
+                                "name": parts[1],
+                                "state": " ".join(parts[2:]),
+                                "machine": m["name"]
+                            })
+                        elif len(parts) == 2:
+                            remote_vms.append({"id": "-", "name": parts[0], "state": parts[1], "machine": m["name"]})
+                    with _remote_poll_lock:
+                        _remote_vm_cache[m["name"]] = remote_vms
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+_remote_poller_started = False
+
+
+def _start_remote_poller():
+    global _remote_poller_started
+    if _remote_poller_started:
+        return
+    _remote_poller_started = True
+    t = threading.Thread(target=_poll_remote_machines, daemon=True)
+    t.start()
 
 
 def generate_infra_config():
@@ -481,10 +582,12 @@ def api_status():
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
         ).fetchone()[0]
+    dhcp_map = get_dhcp_host_map()
     return jsonify(vms=vms, clusters=clusters_data, resources=resources,
                    cluster_versions=cluster_versions, cluster_info=cluster_info,
                    cluster_reservations=cluster_reservations,
-                   total_deployments=total_deployments)
+                   total_deployments=total_deployments,
+                   dhcp_map=dhcp_map, cluster_ranges=CLUSTER_IP_RANGES)
 
 
 @app.route("/")
@@ -1136,6 +1239,7 @@ def user_dashboard():
         lab_machines_list.append({"id": m["id"], "name": m["name"],
                                   "cpus": specs.get("cpus", "?"), "ram_gb": specs.get("ram_gb", "?")})
 
+    dhcp_map = get_dhcp_host_map()
     return render_template("user_dashboard.html",
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
@@ -1148,7 +1252,9 @@ def user_dashboard():
                            total_deployments=total_deployments,
                            lab_machines=lab_machines_list,
                            sno_slots=sorted(config.SNO_SLOTS.keys()),
-                           sno_install_methods=config.SNO_INSTALL_METHODS)
+                           sno_install_methods=config.SNO_INSTALL_METHODS,
+                           dhcp_map=dhcp_map,
+                           cluster_ranges=CLUSTER_IP_RANGES)
 
 
 # --- Cluster Management ---
@@ -1725,16 +1831,36 @@ def terminal_connect(auth=None):
         disconnect()
         return
 
-    # All terminal sessions run as the shared 'ocpterm' user
     linux_user = "ocpterm"
     cluster = (auth or {}).get("cluster", "") if auth else ""
 
+    # Check if cluster lives on a remote machine
+    remote_machine = None
+    if cluster:
+        with get_db_ctx() as conn:
+            dep = conn.execute(
+                "SELECT machine_id FROM deployments "
+                "WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+                (cluster,)
+            ).fetchone()
+            if dep and dep["machine_id"]:
+                remote_machine = conn.execute(
+                    "SELECT hostname, ssh_user, ssh_port FROM lab_machines WHERE id=?",
+                    (dep["machine_id"],)
+                ).fetchone()
+
     pid, fd = pty.fork()
     if pid == 0:
-        # Child — become ocpterm with TERM set for curses (watch, top, vi)
         os.environ["TERM"] = "xterm-256color"
         try:
-            os.execlp("su", "su", "-", linux_user, "-w", "TERM")
+            if remote_machine:
+                os.execlp("ssh", "ssh", "-t",
+                          "-o", "StrictHostKeyChecking=no",
+                          "-o", "ConnectTimeout=10",
+                          "-p", str(remote_machine["ssh_port"]),
+                          f"{remote_machine['ssh_user']}@{remote_machine['hostname']}")
+            else:
+                os.execlp("su", "su", "-", linux_user, "-w", "TERM")
         except Exception as e:
             os.write(2, f"exec failed: {e}\n".encode())
             os._exit(1)
@@ -1749,13 +1875,20 @@ def terminal_connect(auth=None):
             socketio.start_background_task(_read_pty_output, request.sid, fd)
 
             if cluster:
-                kc_path = _find_kubeconfig(cluster)
-                if kc_path:
-                    # Shell reads this from stdin when ready — no sleep needed.
+                if remote_machine:
+                    time.sleep(1)
+                    kc_cmd = f"export KUBECONFIG=$(ls /kvm/clusters/{cluster}-*/auth/kubeconfig 2>/dev/null | head -1)\n"
                     try:
-                        os.write(fd, f"export KUBECONFIG={kc_path}\n".encode())
+                        os.write(fd, kc_cmd.encode())
                     except OSError:
                         pass
+                else:
+                    kc_path = _find_kubeconfig(cluster)
+                    if kc_path:
+                        try:
+                            os.write(fd, f"export KUBECONFIG={kc_path}\n".encode())
+                        except OSError:
+                            pass
 
             log_activity("terminal_open", f"{user_email} cluster={cluster}" if cluster else user_email)
         except Exception:
@@ -1957,6 +2090,7 @@ if __name__ == "__main__":
         cli_set_password()
     else:
         init_db()
+        _start_remote_poller()
         if not config.is_setup_complete():
             print("First-run setup not completed. Visit /labs/setup in the browser.")
         socketio.run(app, host="127.0.0.1", port=5000, debug=False,
