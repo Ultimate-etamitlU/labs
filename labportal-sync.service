@@ -1,0 +1,12 @@
+[Unit]
+Description=OCP Lab Portal — nightly git sync and conditional restart
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/root/labs/sync-portal.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sync-portal

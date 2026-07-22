@@ -1,0 +1,11 @@
+[Unit]
+Description=OCP Lab Portal — nightly sync at midnight
+Requires=labportal-sync.service
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
