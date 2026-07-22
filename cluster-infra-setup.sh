@@ -127,9 +127,18 @@ add_zone_if_missing() {
     local zone_name=$1
     local zone_file=$2
     local _zone_type=$3
+    local zone_basename
+    zone_basename=$(basename "$zone_file")
 
     if grep -q "\"${zone_name}\"" "$NAMED_ZONES" 2>/dev/null; then
-        echo "  Zone '${zone_name}' already declared"
+        # Zone declared — ensure file directive points to our filename
+        if ! grep -A5 "\"${zone_name}\"" "$NAMED_ZONES" | grep -q "file \"${zone_file}\""; then
+            echo "  Zone '${zone_name}' declared but file path stale — updating to ${zone_file}"
+            # Replace any file "*.zone_name*" line inside the zone block
+            sed -i "/zone \"${zone_name}\"/,/};/ s|file \"[^\"]*\";|file \"${zone_file}\";|" "$NAMED_ZONES"
+        else
+            echo "  Zone '${zone_name}' already declared with correct file"
+        fi
     else
         echo "  Adding zone '${zone_name}' to $NAMED_ZONES"
         cat >> "$NAMED_ZONES" << ZONEEOF
