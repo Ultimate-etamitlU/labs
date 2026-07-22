@@ -221,6 +221,12 @@ log "=== Step 2: Generate install configs ==="
 
 PULL_SECRET=$(cat "$PULL_SECRET_FILE")
 SSH_KEY=$(cat "$SSH_KEY_FILE")
+# PEER_SSH_PUBKEY: portal passes the peer machine's stored pubkey so core@ is
+# accessible from the peer itself. Only set for peer deploys (this script).
+if [ -n "${PEER_SSH_PUBKEY:-}" ] && [ "$PEER_SSH_PUBKEY" != "$SSH_KEY" ]; then
+    SSH_KEY="${SSH_KEY}
+${PEER_SSH_PUBKEY}"
+fi
 
 case "$INSTALL_METHOD" in
     agent-none)
@@ -264,7 +270,8 @@ controlPlane:
 platform:
 ${PLATFORM_YAML}
 pullSecret: '${PULL_SECRET}'
-sshKey: '${SSH_KEY}'
+sshKey: |
+$(echo "${SSH_KEY}" | sed 's/^/  /')
 ICEOF
 
 # Backup

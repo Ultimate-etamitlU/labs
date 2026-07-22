@@ -161,6 +161,11 @@ def init_db():
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE lab_machines ADD COLUMN role TEXT NOT NULL DEFAULT 'peer'")
 
+    try:
+        conn.execute("SELECT ssh_pubkey FROM lab_machines LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE lab_machines ADD COLUMN ssh_pubkey TEXT DEFAULT ''")
+
     boss = conn.execute("SELECT id FROM lab_machines WHERE role='boss'").fetchone()
     if not boss:
         import subprocess as _sp

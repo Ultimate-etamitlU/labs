@@ -904,9 +904,22 @@ def _verify_machine(machine_id):
             "libvirt": True,
         })
 
+        # Fetch and store the peer's SSH public key for later use in cluster deploys
+        pubkey = ""
+        try:
+            pk_result = subprocess.run(
+                ssh_base + ["cat ~/.ssh/id_ed25519.pub 2>/dev/null || cat ~/.ssh/id_rsa.pub 2>/dev/null || true"],
+                capture_output=True, text=True, timeout=10
+            )
+            pubkey = pk_result.stdout.strip()
+        except Exception:
+            pass
+
         with get_db_ctx() as conn:
-            conn.execute("UPDATE lab_machines SET status='ready', status_detail='', specs_json=? WHERE id=?",
-                         (specs_json, machine_id))
+            conn.execute(
+                "UPDATE lab_machines SET status='ready', status_detail='', specs_json=?, ssh_pubkey=? WHERE id=?",
+                (specs_json, pubkey, machine_id)
+            )
             conn.commit()
 
     except Exception as e:
@@ -1463,6 +1476,8 @@ def cluster_create():
             deploy_args = [deploy_script, ocp_version, cluster_name, machine["hostname"], install_method]
             env["SSH_USER"] = machine["ssh_user"]
             env["SSH_PORT"] = str(machine["ssh_port"])
+            if machine.get("ssh_pubkey"):
+                env["PEER_SSH_PUBKEY"] = machine["ssh_pubkey"]
         else:
             deploy_args = [deploy_script, ocp_version, cluster_name, str(ip_offset), network_type]
 
