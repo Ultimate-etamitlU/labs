@@ -159,6 +159,11 @@ add_zone_if_missing "122.168.192.in-addr.arpa" "${REVERSE_ZONE}" "reverse"
 echo ""
 echo "=== Generating DNS zone files ==="
 
+# Ensure root owns zone files before writing (named:named ownership blocks root writes)
+for _zf in "$FORWARD_ZONE" "$REVERSE_ZONE"; do
+    [ -f "$_zf" ] && chown root "$_zf"
+done
+
 # --- Forward zone ---
 cat > "$FORWARD_ZONE" << EOF
 ; ${MANAGED_BY}
