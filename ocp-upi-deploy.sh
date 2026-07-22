@@ -42,10 +42,22 @@ MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
 BRIDGE_IP="192.168.122.1"
 NETMASK="255.255.255.0"
 
-# IP offset — configurable via 3rd argument or IP_OFFSET env var.
-# Defaults to 110 for backward compatibility with existing DNS zones.
-# For parallel clusters, pass a different offset (e.g., ./ocp-upi-deploy.sh 4.20.1 lab 150)
-IP_OFFSET="${3:-${IP_OFFSET:-110}}"
+# For fixed UPI slots, enforce the correct offset regardless of args.
+# This prevents DHCP collisions when scripts are run manually with wrong offsets.
+declare -A _FIXED_SLOTS=([upi1]=110 [upi2]=131 [upi3]=151)
+if [[ -n "${_FIXED_SLOTS[$CLUSTER_NAME]+x}" ]]; then
+    CORRECT_OFFSET="${_FIXED_SLOTS[$CLUSTER_NAME]}"
+    if [[ -n "${3:-}" && "${3}" != "$CORRECT_OFFSET" ]]; then
+        echo "ERROR: '$CLUSTER_NAME' is a fixed slot — offset must be $CORRECT_OFFSET, not '${3}'."
+        echo "  Omit the ip_offset argument or pass $CORRECT_OFFSET explicitly."
+        exit 1
+    fi
+    IP_OFFSET="$CORRECT_OFFSET"
+else
+    # IP offset — configurable via 3rd argument or IP_OFFSET env var.
+    # For parallel clusters, pass a different offset (e.g., ./ocp-upi-deploy.sh 4.20.1 lab 150)
+    IP_OFFSET="${3:-${IP_OFFSET:-110}}"
+fi
 NETWORK_TYPE="${4:-OVNKubernetes}"
 
 # Derive per-cluster MAC suffix from offset

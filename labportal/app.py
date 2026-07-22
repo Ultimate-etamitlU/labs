@@ -582,7 +582,7 @@ def setup():
                            email_domains="",
                            base_domain="example.com", lab_hostname="",
                            storage_dir="/kvm",
-                           slots={"cluster1": 110, "cluster2": 120, "cluster3": 130})
+                           slots={"upi1": 110, "upi2": 131, "upi3": 151})
 
 
 # --- Routes ---
