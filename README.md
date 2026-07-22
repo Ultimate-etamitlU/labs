@@ -96,15 +96,19 @@ sequenceDiagram
 
 ```
 labs/
-├── ocp-upi-deploy.sh        # Automated OCP UPI deployment script
-├── ocp-ipi-deploy.sh        # Automated OCP IPI baremetal deployment script
+├── ocp-upi-deploy.sh         # Automated OCP UPI deployment script
+├── ocp-ipi-deploy.sh         # Automated OCP IPI baremetal deployment script
+├── ocp-sno-deploy.sh         # Automated SNO deployment on remote peer systems
 ├── cluster-infra-setup.sh    # One-time DNS + HAProxy infrastructure setup
+├── peer.sh                   # One-time setup for SNO infrastructure on a peer system
+├── sno-infra-update.sh       # Add/remove SNO DNS + HAProxy records (runs on peer)
 ├── csr-approver.sh           # Auto-approve CSRs until cluster ready (systemd template)
 ├── update-motd.sh            # Dynamic SSH MOTD — shows active clusters + credentials
 ├── labportal/
 │   ├── app.py                # Flask + SocketIO app (routes, auth, terminal, lifecycle)
 │   ├── config.py             # Configuration (install types, cluster slots, env vars)
 │   ├── db.py                 # SQLite schema (users, deployments, reservations, extensions)
+│   ├── add-user.py           # CLI script to create/update portal users and Linux accounts
 │   ├── requirements.txt      # Python dependencies (flask, flask-socketio)
 │   ├── labportal.service     # systemd unit file for production deployment
 │   ├── static/
@@ -151,17 +155,17 @@ All clusters use **OVNKubernetes** as the network plugin. Resource availability 
 
 Pre-configured slots with fixed DNS and HAProxy — no service restarts needed when deploying or deleting clusters.
 
-| Slot | IP Range | Bootstrap | Masters | Workers | Resources |
-|------|----------|-----------|---------|---------|-----------|
-| `upi1` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | 16 vCPUs, 80G RAM |
-| `upi2` | `.120 – .125` | `.120` | `.121 – .123` | `.124 – .125` | 16 vCPUs, 80G RAM |
-| `upi3` | `.130 – .135` | `.130` | `.131 – .133` | `.134 – .135` | 16 vCPUs, 80G RAM |
+| Slot | Allocated Range | Node IPs | Bootstrap | Masters | Workers | Resources |
+|------|----------------|----------|-----------|---------|---------|-----------|
+| `upi1` | `.110 – .130` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | 16 vCPUs, 80G RAM |
+| `upi2` | `.131 – .150` | `.131 – .137` | `.131` | `.132 – .134` | `.135 – .137` | 16 vCPUs, 80G RAM |
+| `upi3` | `.151 – .170` | `.151 – .156` | `.151` | `.152 – .154` | `.155 – .156` | 16 vCPUs, 80G RAM |
 
 All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes through HAProxy on `192.168.122.1`.
 
 ### IPI (Installer Provisioned Infrastructure — Baremetal)
 
-Dynamic slot allocation — user provides a cluster name, the portal auto-assigns an IP offset from the `140–190` range (blocks of 10).
+Dynamic slot allocation — user provides a cluster name, the portal auto-assigns an IP offset from the `171–254` range (blocks of 10, after UPI slots end at `.170`).
 
 | Component | Details |
 |-----------|---------|
@@ -357,12 +361,12 @@ Click **Delete Cluster** in the portal dashboard (or wait for the lifetime to ex
 
 | Feature | Description |
 |---------|-------------|
-| **Live Dashboard** | Real-time RAM, storage, CPU utilization, VM count with SVG ring charts (5s polling) |
+| **Live Dashboard** | Real-time RAM, storage, CPU utilization, VM count with SVG ring charts (5s polling); VM tiles show System / Role / Status / IP; cluster IP range banner per slot |
 | **Cluster Lifecycle** | Mandatory lifetime at deploy time; background reaper auto-deletes expired clusters |
 | **Extension Requests** | "More than a week" triggers admin approval flow; admin can extend 1-30 days |
 | **Web Terminal** | Browser-based shell via xterm.js + SocketIO; per-cluster Terminal buttons auto-set KUBECONFIG; 1-hour inactivity timeout |
 | **Activity Log** | Tracks login, logout, deploy, delete, auto-delete, terminal events with user/IP; admin-visible with filtering and pagination |
-| **User Management** | Admin creates accounts with auto-generated passwords; Linux user creation with group-based access; enable/disable toggle |
+| **User Management** | Admin creates accounts with auto-generated passwords; Linux user creation with group-based access; enable/disable toggle; `add-user.py` CLI for reliable user + Linux account creation in one command |
 | **Unified Login** | Single login page for users and admins; admin privileges granted via `is_admin` flag |
 | **Password Reset** | Self-service forgot password flow; admin-approved reset with forced password change |
 | **Install Types** | UPI (fixed slots, HAProxy) and IPI baremetal (dynamic names, VBMC/ironic, keepalived) |
