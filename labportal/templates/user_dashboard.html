@@ -254,21 +254,26 @@
                 </div>
                 <div class="vm-grid">
                     {% for vm in cluster_vms %}
+                    {% set vm_ip = dhcp_map.get(vm.name, '') %}
+                    {% if 'bootstrap' in vm.name %}{% set vm_role = 'Bootstrap' %}
+                    {% elif 'master' in vm.name %}{% set vm_role = 'Master' %}
+                    {% elif 'worker' in vm.name %}{% set vm_role = 'Worker' %}
+                    {% else %}{% set vm_role = 'VM' %}{% endif %}
                     <div class="vm-tile {{ 'vm-running' if vm.state == 'running' else 'vm-off' }}">
-                        <div class="vm-name">{{ vm.name }}</div>
-                        <div class="vm-role">
-                            {% if 'bootstrap' in vm.name %}bootstrap
-                            {% elif 'master' in vm.name %}master
-                            {% elif 'worker' in vm.name %}worker
-                            {% else %}vm{% endif %}
-                        </div>
-                        <div class="vm-state">
-                            <span class="state-dot {{ 'dot-green' if vm.state == 'running' else 'dot-red' }}"></span>
-                            {{ vm.state }}
-                        </div>
+                        <div class="vm-field"><span class="vm-label">System</span><span class="vm-value vm-sysname">{{ vm.name }}</span></div>
+                        <div class="vm-field"><span class="vm-label">Role</span><span class="vm-value">{{ vm_role }}</span></div>
+                        <div class="vm-field"><span class="vm-label">Status</span><span class="vm-value"><span class="state-dot {{ 'dot-green' if vm.state == 'running' else 'dot-red' }}"></span>{{ vm.state | capitalize }}</span></div>
+                        <div class="vm-field"><span class="vm-label">IP</span><span class="vm-value vm-ip">{{ vm_ip if vm_ip else '—' }}</span></div>
                     </div>
                     {% endfor %}
                 </div>
+                {% set rng = cluster_ranges.get(cluster_name) %}
+                {% if rng %}
+                <div class="cluster-ip-range">
+                    <span class="cluster-ip-range-label">IP range</span>
+                    <span class="cluster-ip-range-value">{{ rng[0] }} – {{ rng[1] }}</span>
+                </div>
+                {% endif %}
             </div>
             {% endfor %}
         {% else %}
@@ -516,6 +521,8 @@ document.addEventListener('keydown', function(e) {
                 const versions = data.cluster_versions || {};
                 const cInfo = data.cluster_info || {};
                 const cRes = data.cluster_reservations || {};
+                const dhcpMap = data.dhcp_map || {};
+                const clusterRanges = data.cluster_ranges || {};
                 clusterNames.forEach(name => {
                     const vms = data.clusters[name];
                     const runCount = vms.filter(v => v.state === 'running').length;
@@ -552,15 +559,25 @@ document.addEventListener('keydown', function(e) {
                     vms.forEach(vm => {
                         const stateClass = vm.state === 'running' ? 'vm-running' : 'vm-off';
                         const dotClass = vm.state === 'running' ? 'dot-green' : 'dot-red';
-                        let role = 'vm';
-                        if (vm.name.includes('bootstrap')) role = 'bootstrap';
-                        else if (vm.name.includes('master')) role = 'master';
-                        else if (vm.name.includes('worker')) role = 'worker';
-                        html += '<div class="vm-tile ' + stateClass + '"><div class="vm-name">' + vm.name + '</div>';
-                        html += '<div class="vm-role">' + role + '</div>';
-                        html += '<div class="vm-state"><span class="state-dot ' + dotClass + '"></span>' + vm.state + '</div></div>';
+                        let role = 'VM';
+                        if (vm.name.includes('bootstrap')) role = 'Bootstrap';
+                        else if (vm.name.includes('master')) role = 'Master';
+                        else if (vm.name.includes('worker')) role = 'Worker';
+                        const vmIp = dhcpMap[vm.name] || '—';
+                        const stateLabel = vm.state.charAt(0).toUpperCase() + vm.state.slice(1);
+                        html += '<div class="vm-tile ' + stateClass + '">';
+                        html += '<div class="vm-field"><span class="vm-label">System</span><span class="vm-value vm-sysname">' + vm.name + '</span></div>';
+                        html += '<div class="vm-field"><span class="vm-label">Role</span><span class="vm-value">' + role + '</span></div>';
+                        html += '<div class="vm-field"><span class="vm-label">Status</span><span class="vm-value"><span class="state-dot ' + dotClass + '"></span>' + stateLabel + '</span></div>';
+                        html += '<div class="vm-field"><span class="vm-label">IP</span><span class="vm-value vm-ip">' + vmIp + '</span></div>';
+                        html += '</div>';
                     });
-                    html += '</div></div>';
+                    html += '</div>';
+                    const rng = clusterRanges[name];
+                    if (rng) {
+                        html += '<div class="cluster-ip-range"><span class="cluster-ip-range-label">IP range</span><span class="cluster-ip-range-value">' + rng[0] + ' – ' + rng[1] + '</span></div>';
+                    }
+                    html += '</div>';
                 });
                 container.innerHTML = html;
                 updateCountdowns();
