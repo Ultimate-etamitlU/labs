@@ -165,7 +165,15 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 
 ### IPI (Installer Provisioned Infrastructure — Baremetal)
 
-Dynamic slot allocation — user provides a cluster name, the portal auto-assigns an IP offset from the `171–254` range (blocks of 10, after UPI slots end at `.170`).
+3 fixed slots, each with a 15-IP block. Portal auto-assigns the next free slot.
+
+| Slot | Range | API VIP | Ingress VIP | Masters | Workers | Spare |
+|------|-------|---------|-------------|---------|---------|-------|
+| `ipi1` | `.200–.214` | `.200` | `.201` | `.202–.204` | `.205–.209` | `.210–.214` |
+| `ipi2` | `.215–.229` | `.215` | `.216` | `.217–.219` | `.220–.224` | `.225–.229` |
+| `ipi3` | `.230–.244` | `.230` | `.231` | `.232–.234` | `.235–.239` | `.240–.244` |
+
+`.245–.254` reserved as buffer. All IPs on `192.168.122.0/24`.
 
 | Component | Details |
 |-----------|---------|
@@ -173,7 +181,8 @@ Dynamic slot allocation — user provides a cluster name, the portal auto-assign
 | Workers | 2 VMs, 4 vCPUs, 16G RAM each |
 | VIPs | API VIP = `.offset`, Ingress VIP = `.offset+1` (managed by keepalived on nodes) |
 | Master IPs | `.offset+2` through `.offset+4` |
-| Worker IPs | `.offset+5` through `.offset+6` |
+| Worker IPs | `.offset+5` through `.offset+9` |
+| Spare | `.offset+10` through `.offset+14` |
 | Provisioning | PXE boot via ironic over `provisioning` network (`192.168.0.0/24`) |
 | BMC | VirtualBMC (VBMC) exposes VMs as IPMI endpoints for the installer |
 | DNS | Dynamic records in include files (`/var/named/ipi-forward.include`, `ipi-reverse.include`) |

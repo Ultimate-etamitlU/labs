@@ -54,10 +54,10 @@ SNO_INSTALL_METHODS = {
     "upi-bip": "UPI (Bootstrap-in-Place)",
 }
 
-# IPI dynamic IP offset range (blocks of 10)
-IPI_OFFSET_START = 140
-IPI_OFFSET_END = 190
-IPI_OFFSET_STEP = 10
+# IPI dynamic IP offset range (blocks of 15, 3 slots: ipi1/ipi2/ipi3)
+IPI_OFFSET_START = 200
+IPI_OFFSET_END = 230
+IPI_OFFSET_STEP = 15
 
 
 # ---------------------------------------------------------------------------
