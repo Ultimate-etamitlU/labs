@@ -658,6 +658,9 @@ def admin_panel():
             "SELECT * FROM cluster_extension_requests WHERE status='pending' ORDER BY requested_at DESC"
         ).fetchall()
         lab_machines_raw = conn.execute("SELECT * FROM lab_machines ORDER BY added_at DESC").fetchall()
+        unread_feedback = conn.execute(
+            "SELECT COUNT(*) FROM feedback WHERE is_read=0"
+        ).fetchone()[0]
     lab_machines = []
     for m in lab_machines_raw:
         md = dict(m)
@@ -668,6 +671,7 @@ def admin_panel():
         lab_machines.append(md)
     return render_template("admin.html", users=users, reset_requests=reset_requests,
                            extension_requests=extension_requests, lab_machines=lab_machines,
+                           unread_feedback=unread_feedback,
                            maintenance_message=config.get_site("maintenance_message") or "")
 
 
@@ -1009,6 +1013,49 @@ def admin_remove_machine(machine_id):
     log_activity("machine_removed", machine["name"])
     flash(f"Machine '{machine['name']}' removed.", "success")
     return redirect(url_for("admin_panel"))
+
+
+@app.route("/feedback/submit", methods=["POST"])
+@login_required
+def feedback_submit():
+    message = request.form.get("message", "").strip()
+    if not message:
+        flash("Feedback message cannot be empty.", "danger")
+        return redirect(url_for("user_dashboard"))
+    if len(message) > 2000:
+        flash("Feedback must be 2000 characters or fewer.", "danger")
+        return redirect(url_for("user_dashboard"))
+    with get_db_ctx() as conn:
+        conn.execute(
+            "INSERT INTO feedback (submitted_by, message) VALUES (?, ?)",
+            (session["user_email"], message)
+        )
+        conn.commit()
+    flash("Feedback submitted. Thank you!", "success")
+    return redirect(url_for("user_dashboard"))
+
+
+@app.route("/admin/feedback")
+@login_required(admin_only=True)
+def admin_feedback():
+    with get_db_ctx() as conn:
+        feedback_rows = conn.execute(
+            "SELECT * FROM feedback ORDER BY submitted_at DESC"
+        ).fetchall()
+        unread_count = conn.execute(
+            "SELECT COUNT(*) FROM feedback WHERE is_read=0"
+        ).fetchone()[0]
+    return render_template("admin_feedback.html", feedback_rows=feedback_rows,
+                           unread_count=unread_count)
+
+
+@app.route("/admin/feedback/<int:feedback_id>/read", methods=["POST"])
+@login_required(admin_only=True)
+def admin_feedback_mark_read(feedback_id):
+    with get_db_ctx() as conn:
+        conn.execute("UPDATE feedback SET is_read=1 WHERE id=?", (feedback_id,))
+        conn.commit()
+    return redirect(url_for("admin_feedback"))
 
 
 def derive_linux_username(email):

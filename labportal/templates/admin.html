@@ -239,6 +239,25 @@
 
 <div class="dash-card" style="margin-bottom: 1.5rem;">
     <div class="dash-card-header">
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+            <h2>Feedback</h2>
+            {% if unread_feedback > 0 %}
+            <span class="stat-pill" style="background:#f0ab00;color:#1b1d21;">{{ unread_feedback }} unread</span>
+            {% endif %}
+        </div>
+        <a href="{{ url_for('admin_feedback') }}" class="admin-action-btn" style="text-decoration:none;">View all</a>
+    </div>
+    <div class="dash-card-body" style="color:#8a8d90;font-size:0.875rem;">
+        {% if unread_feedback > 0 %}
+        {{ unread_feedback }} unread submission{{ 's' if unread_feedback != 1 }}. Click "View all" to review.
+        {% else %}
+        No unread feedback.
+        {% endif %}
+    </div>
+</div>
+
+<div class="dash-card" style="margin-bottom: 1.5rem;">
+    <div class="dash-card-header">
         <h2>Lab Machines</h2>
         {% if lab_machines %}
         <span class="stat-pill">{{ lab_machines|length }} machine{{ 's' if lab_machines|length != 1 }}</span>
