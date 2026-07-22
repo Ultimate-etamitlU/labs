@@ -517,12 +517,18 @@ else
             ip="${SUBNET}.$((offset + ip_delta))"
             mac="52:54:00:${mac_base}:00:${mac_suffix}"
             hostname="${role}.${cname}.${DOMAIN}"
-            # Delete first (idempotent), then add
+            # Handle live and persistent independently — avoids state-sync
+            # failures where one store has the entry and the other doesn't.
             virsh net-update default delete ip-dhcp-host \
-                "<host mac='${mac}'/>" --live --config 2>/dev/null || true
+                "<host mac='${mac}'/>" --live   2>/dev/null || true
+            virsh net-update default delete ip-dhcp-host \
+                "<host mac='${mac}'/>" --config 2>/dev/null || true
             virsh net-update default add ip-dhcp-host \
                 "<host mac='${mac}' name='${hostname}' ip='${ip}'/>" \
-                --live --config
+                --live   2>/dev/null || true
+            virsh net-update default add ip-dhcp-host \
+                "<host mac='${mac}' name='${hostname}' ip='${ip}'/>" \
+                --config 2>/dev/null || true
             echo "    ${mac} -> ${ip} (${hostname})"
         done
     done
