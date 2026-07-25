@@ -1153,8 +1153,8 @@ def create_linux_user(username, first_name, last_name):
             capture_output=True, timeout=5
         )
 
-    # Copy cluster SSH key so user can ssh core@<node> without password
-    ssh_key_file = os.environ.get("SSH_KEY_FILE", os.path.expanduser("~/.ssh/id_ed25519"))
+    # Copy labusers shared key so user can ssh core@<node> — same key baked into all clusters
+    ssh_key_file = os.environ.get("SSH_KEY_FILE", "/etc/labusers/id_ed25519")
     user_ssh_dir = f"/home/{username}/.ssh"
     if os.path.isfile(ssh_key_file):
         try:
