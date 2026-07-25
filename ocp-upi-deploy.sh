@@ -68,7 +68,7 @@ VM_PREFIX="vm-${CLUSTER_NAME}"
 
 # Pull secret and SSH key — configurable via environment
 PULL_SECRET_FILE="${PULL_SECRET_FILE:-/root/pull-secret.txt}"
-SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519.pub}"
+SSH_KEY_FILE="${SSH_KEY_FILE:-/etc/labusers/id_ed25519.pub}"
 
 # --- CLEANUP TRAP ---
 cleanup() {

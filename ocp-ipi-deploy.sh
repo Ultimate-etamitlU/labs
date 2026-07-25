@@ -19,7 +19,7 @@ set -euo pipefail
 #   - VirtualBMC daemon running (vbmcd)
 #   - libvirt networks: "default" (baremetal) and "provisioning" (PXE)
 #   - Pull secret at /root/pull-secret.txt
-#   - SSH key at ~/.ssh/id_ed25519.pub
+#   - SSH key at /etc/labusers/id_ed25519.pub
 # =============================================================================
 
 # --- CONFIGURATION ---
@@ -77,7 +77,7 @@ NUM_WORKERS=2
 
 # Pull secret and SSH key
 PULL_SECRET_FILE="${PULL_SECRET_FILE:-/root/pull-secret.txt}"
-SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519.pub}"
+SSH_KEY_FILE="${SSH_KEY_FILE:-/etc/labusers/id_ed25519.pub}"
 
 # DNS zone files — IPI uses separate include files (writable by root)
 FWD_ZONE="/var/named/ipi-forward.include"
