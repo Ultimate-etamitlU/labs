@@ -2211,10 +2211,11 @@ DEPLOY_MAX_AGE_SECS = int(os.environ.get("LABPORTAL_DEPLOY_MAX_AGE", "5400"))  #
 
 
 def _deploy_watchdog():
-    """Kill deploy scripts that run past the max duration and free their slot.
+    """Kill deploy scripts that run past the max duration and destroy their VMs.
 
     Guards against a deploy that hangs mid-way, which would otherwise leave the
     row stuck in 'deploying' and the slot occupied until its reservation expires.
+    Also destroys any VMs that were partially created during the failed deploy.
     """
     while True:
         time.sleep(300)
@@ -2226,6 +2227,9 @@ def _deploy_watchdog():
                     "AND started_at < datetime('now', '-' || ? || ' seconds')",
                     (str(DEPLOY_MAX_AGE_SECS),)
                 ).fetchall()
+            if not stuck:
+                continue
+            _, clusters, _ = get_lab_status()
             for row in stuck:
                 name = row["cluster_name"]
                 pid = row["pid"]
@@ -2236,19 +2240,14 @@ def _deploy_watchdog():
                         os.killpg(os.getpgid(pid), signal.SIGTERM)
                     except (OSError, ProcessLookupError):
                         pass
+                _delete_cluster_internal(name, clusters.get(name, []))
                 with get_db_ctx() as conn:
-                    conn.execute(
-                        "UPDATE deployments SET status='failed', finished_at=datetime('now') "
-                        "WHERE cluster_name=? AND status='deploying'", (name,))
-                    conn.execute(
-                        "DELETE FROM cluster_reservations WHERE cluster_name=?", (name,))
                     conn.execute(
                         "INSERT INTO activity_log (event, user_email, ip_address, details) "
                         "VALUES (?, ?, ?, ?)",
                         ("deploy_timeout", "system", "127.0.0.1",
                          f"{name} killed after >{DEPLOY_MAX_AGE_SECS // 60}min"))
                     conn.commit()
-                _write_reservation_file()
         except Exception as e:
             app.logger.error("deploy_watchdog error: %s", e)
 
