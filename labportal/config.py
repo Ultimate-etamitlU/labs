@@ -32,6 +32,7 @@ INSTALL_TYPES = {
         "vcpus": 32,    # 3×8 masters + 2×4 workers
         "ram_gb": 128,   # 3×32G + 2×16G
         "requires_slot": False,
+        "requires_ipi_slot": True,
     },
     "sno": {
         "label": "SNO (Single Node)",
@@ -54,10 +55,15 @@ SNO_INSTALL_METHODS = {
     "upi-bip": "UPI (Bootstrap-in-Place)",
 }
 
-# IPI dynamic IP offset range (blocks of 15, 3 slots: ipi1/ipi2/ipi3)
-IPI_OFFSET_START = 200
-IPI_OFFSET_END = 230
-IPI_OFFSET_STEP = 15
+# IPI fixed slots — 15-IP blocks from 200-244
+IPI_SLOTS = {
+    "ipi1": 200,
+    "ipi2": 215,
+    "ipi3": 230,
+}
+
+def ipi_slots():
+    return IPI_SLOTS
 
 
 # ---------------------------------------------------------------------------

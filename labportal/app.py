@@ -1296,25 +1296,6 @@ def change_password():
     return render_template("reset_password.html", force_change=True)
 
 
-def _find_next_ipi_offset(clusters):
-    """Find the next available IPI IP offset (blocks of 15 from 200-244)."""
-    # Collect used offsets from DB
-    with get_db_ctx() as conn:
-        rows = conn.execute(
-            "SELECT ip_offset FROM deployments WHERE install_type='ipi' AND status IN ('deploying','completed')"
-        ).fetchall()
-    used_offsets = {row["ip_offset"] for row in rows if row["ip_offset"]}
-    # Also check running VMs to catch manually deployed clusters
-    for name in clusters:
-        for vm in clusters[name]:
-            if vm["state"] == "running":
-                # Check if any VM IP falls in IPI range
-                pass
-    for offset in range(config.IPI_OFFSET_START, config.IPI_OFFSET_END + 1, config.IPI_OFFSET_STEP):
-        if offset not in used_offsets:
-            return offset
-    return None
-
 
 def _check_resources(install_type):
     """Check if enough CPU and RAM are available for the given install type."""
@@ -1341,6 +1322,8 @@ def user_dashboard():
     vms, clusters, resources = get_lab_status()
     slots = config.cluster_slots()
     available_slots = sorted(name for name in slots if name not in clusters)
+    ipi_slots = config.ipi_slots()
+    available_ipi_slots = sorted(name for name in ipi_slots if name not in clusters)
     ssh_user = derive_linux_username(session.get("user_email", ""))
     domain = config.base_domain()
     cluster_versions = get_cluster_versions(clusters)
@@ -1372,6 +1355,7 @@ def user_dashboard():
                            cluster_reservations=cluster_reservations,
                            total_deployments=total_deployments,
                            lab_machines=lab_machines_list,
+                           available_ipi_slots=available_ipi_slots,
                            sno_slots=sorted(config.SNO_SLOTS.keys()),
                            sno_install_methods=config.SNO_INSTALL_METHODS,
                            dhcp_map=dhcp_map,
@@ -1479,15 +1463,15 @@ def cluster_create():
             flash(f"Invalid cluster slot '{cluster_name}'. Choose from: {', '.join(sorted(slots))}.", "danger")
             return redirect(url_for("user_dashboard"))
         ip_offset = slots[cluster_name]
+    elif install_type == "ipi":
+        ipi_slot_map = config.ipi_slots()
+        if cluster_name not in ipi_slot_map:
+            flash(f"Invalid IPI slot '{cluster_name}'. Choose from: {', '.join(sorted(ipi_slot_map))}.", "danger")
+            return redirect(url_for("user_dashboard"))
+        ip_offset = ipi_slot_map[cluster_name]
     else:
-        # IPI (and future types): cluster_name is user-provided
-        if not re.match(r'^[a-z0-9][a-z0-9\-]{0,14}$', cluster_name):
-            flash("Cluster name must be lowercase alphanumeric (may include hyphens), 1-15 characters.", "danger")
-            return redirect(url_for("user_dashboard"))
-        ip_offset = _find_next_ipi_offset(clusters)
-        if ip_offset is None:
-            flash("No IPI IP offset slots available. Delete an existing IPI cluster first.", "danger")
-            return redirect(url_for("user_dashboard"))
+        flash(f"Unknown install type '{install_type}'.", "danger")
+        return redirect(url_for("user_dashboard"))
 
     # Check if cluster already exists (VMs running)
     if cluster_name in clusters:
@@ -1760,18 +1744,6 @@ def _delete_cluster_internal(cluster_name, cluster_vms):
                     )
                 except Exception:
                     pass
-
-        fwd_zone = "/var/named/ipi-forward.include"
-        rev_zone = "/var/named/ipi-reverse.include"
-        for zone_file in (fwd_zone, rev_zone):
-            if os.path.isfile(zone_file):
-                try:
-                    subprocess.run(
-                        ["sed", "-i", f"/^; IPI-START {cluster_name}$/,/^; IPI-END {cluster_name}$/d", zone_file],
-                        capture_output=True, timeout=10
-                    )
-                except Exception as e:
-                    errors.append(f"DNS cleanup {zone_file}: {e}")
 
         try:
             result = subprocess.run(["virsh", "pool-list", "--all", "--name"],

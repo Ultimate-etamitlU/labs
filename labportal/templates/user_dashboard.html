@@ -110,14 +110,21 @@
                     </select>
                 </div>
             </div>
-            <!-- IPI: free-text name -->
-            <div class="pf-v5-c-form__group" id="name-group" style="min-width: 120px; display: none;">
-                <label class="pf-v5-c-form__label" for="cluster_name_input">
-                    <span class="pf-v5-c-form__label-text">Cluster Name</span>
+            <!-- IPI: slot dropdown -->
+            <div class="pf-v5-c-form__group" id="ipi-slot-group" style="min-width: 120px; display: none;">
+                <label class="pf-v5-c-form__label" for="ipi_slot">
+                    <span class="pf-v5-c-form__label-text">IPI Slot</span>
                 </label>
                 <div class="pf-v5-c-form__group-control">
-                    <input class="pf-v5-c-form-control" type="text" id="cluster_name_input" name="cluster_name_ipi"
-                           placeholder="e.g. ipi1, dev" pattern="[a-z0-9][a-z0-9\-]{0,14}" maxlength="15">
+                    <select class="pf-v5-c-form-control" id="ipi_slot" name="cluster_name_ipi" disabled>
+                        {% if available_ipi_slots %}
+                            {% for slot in available_ipi_slots %}
+                            <option value="{{ slot }}">{{ slot }}</option>
+                            {% endfor %}
+                        {% else %}
+                            <option value="" disabled selected>No IPI slots available</option>
+                        {% endif %}
+                    </select>
                 </div>
             </div>
             <!-- SNO: slot dropdown -->
@@ -360,21 +367,21 @@ function toggleInstallType() {
     var sel = document.getElementById('install_type');
     var opt = sel.options[sel.selectedIndex];
     var requiresSlot = opt.getAttribute('data-slot') === '1';
-    var isRemote = opt.getAttribute('data-remote') === '1';
+    var isIpi = sel.value === 'ipi';
     var isSno = sel.value === 'sno';
     var vcpus = opt.getAttribute('data-vcpus');
     var ram = opt.getAttribute('data-ram');
 
     // Show/hide slot groups based on type
     document.getElementById('slot-group').style.display = requiresSlot ? '' : 'none';
-    document.getElementById('name-group').style.display = (!requiresSlot && !isSno) ? '' : 'none';
+    document.getElementById('ipi-slot-group').style.display = isIpi ? '' : 'none';
     document.getElementById('sno-slot-group').style.display = isSno ? '' : 'none';
     document.getElementById('machine-group').style.display = isSno ? '' : 'none';
     document.getElementById('sno-method-group').style.display = isSno ? '' : 'none';
 
     // Toggle disabled so only visible inputs submit
     document.getElementById('cluster_slot').disabled = !requiresSlot;
-    document.getElementById('cluster_name_input').disabled = (requiresSlot || isSno);
+    document.getElementById('ipi_slot').disabled = !isIpi;
     document.getElementById('sno_slot').disabled = !isSno;
     document.getElementById('target_machine').disabled = !isSno;
     document.getElementById('install_method').disabled = !isSno;
@@ -390,6 +397,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var sel = document.getElementById('install_type');
         var opt = sel.options[sel.selectedIndex];
         var requiresSlot = opt.getAttribute('data-slot') === '1';
+        var isIpi = sel.value === 'ipi';
         var isSno = sel.value === 'sno';
 
         // Remove any previously injected hidden field
@@ -399,9 +407,9 @@ document.addEventListener('DOMContentLoaded', function() {
         var nameVal;
         if (isSno) {
             nameVal = document.getElementById('sno_slot').value;
-        } else if (!requiresSlot) {
-            nameVal = document.getElementById('cluster_name_input').value.trim();
-            if (!nameVal) { e.preventDefault(); alert('Cluster name is required.'); return; }
+        } else if (isIpi) {
+            nameVal = document.getElementById('ipi_slot').value;
+            if (!nameVal) { e.preventDefault(); alert('No IPI slots available.'); return; }
         }
 
         if (nameVal) {

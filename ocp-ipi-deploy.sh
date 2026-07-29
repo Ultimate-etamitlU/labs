@@ -79,9 +79,6 @@ NUM_WORKERS=2
 PULL_SECRET_FILE="${PULL_SECRET_FILE:-/root/pull-secret.txt}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-/etc/labusers/id_ed25519.pub}"
 
-# DNS zone files — IPI uses separate include files (writable by root)
-FWD_ZONE="/var/named/ipi-forward.include"
-REV_ZONE="/var/named/ipi-reverse.include"
 
 # --- CLEANUP FUNCTION ---
 cleanup_ipi() {
@@ -134,35 +131,9 @@ cleanup_ipi() {
             --live --config 2>/dev/null || true
     done
 
-    # Remove DNS records (marked block)
-    if [ -f "$FWD_ZONE" ]; then
-        sed -i "/^; IPI-START ${cluster}$/,/^; IPI-END ${cluster}$/d" "$FWD_ZONE"
-    fi
-    if [ -f "$REV_ZONE" ]; then
-        sed -i "/^; IPI-START ${cluster}$/,/^; IPI-END ${cluster}$/d" "$REV_ZONE"
-    fi
-    # Bump serial and reload
-    update_dns_serial
-    systemctl reload named 2>/dev/null || true
-
     echo "Cleanup complete for $cluster."
 }
 
-# --- HELPER: BUMP DNS SERIAL ---
-update_dns_serial() {
-    local serial
-    serial=$(date +%Y%m%d%H)
-    # Serial is in the main zone files, not the IPI includes
-    local main_fwd="/var/named/forward.upi.example.com"
-    local main_rev="/var/named/reverse.upi.example.com"
-    for zone in "$main_fwd" "$main_rev"; do
-        if [ -f "$zone" ]; then
-            chown root:named "$zone"
-            sed -i "s/[0-9]\{10\}\(\s*; serial\)/${serial}\1/" "$zone"
-            chown named:named "$zone"
-        fi
-    done
-}
 
 # --- TRAP ---
 trap 'echo ""; echo "Caught signal — aborting."' INT TERM
@@ -483,63 +454,17 @@ for i in $(seq 0 $(( TOTAL_NODES - 1 ))); do
     fi
 done
 
-# --- 4. DNS RECORDS ---
+# --- 4. DNS RECORDS (static) ---
 echo ""
-echo "=== Adding DNS records ==="
-
-# Ensure include files exist
-touch "$FWD_ZONE" "$REV_ZONE"
-
-# Remove any existing block for this cluster
-sed -i "/^; IPI-START ${CLUSTER_NAME}$/,/^; IPI-END ${CLUSTER_NAME}$/d" "$FWD_ZONE"
-sed -i "/^; IPI-START ${CLUSTER_NAME}$/,/^; IPI-END ${CLUSTER_NAME}$/d" "$REV_ZONE"
-
-# Forward records
-cat >> "$FWD_ZONE" <<DNS_FWD
-; IPI-START ${CLUSTER_NAME}
-; Cluster: ${CLUSTER_NAME} (IPI 3+2, offset ${IP_OFFSET})
-api.${CLUSTER_NAME}.${BASE_DOMAIN}.		IN	A	${API_VIP}
-api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	${API_VIP}
-*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	${INGRESS_VIP}
-;
-master-0.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	192.168.122.$(( IP_OFFSET + 2 ))
-master-1.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	192.168.122.$(( IP_OFFSET + 3 ))
-master-2.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	192.168.122.$(( IP_OFFSET + 4 ))
-;
-worker-0.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	192.168.122.$(( IP_OFFSET + 5 ))
-worker-1.${CLUSTER_NAME}.${BASE_DOMAIN}.	IN	A	192.168.122.$(( IP_OFFSET + 6 ))
-; IPI-END ${CLUSTER_NAME}
-;EOF
-DNS_FWD
-
-# Reverse PTR records
-cat >> "$REV_ZONE" <<DNS_REV
-; IPI-START ${CLUSTER_NAME}
-$(( IP_OFFSET ))	IN	PTR	api.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 1 ))	IN	PTR	ingress.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 2 ))	IN	PTR	master-0.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 3 ))	IN	PTR	master-1.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 4 ))	IN	PTR	master-2.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 5 ))	IN	PTR	worker-0.${CLUSTER_NAME}.${BASE_DOMAIN}.
-$(( IP_OFFSET + 6 ))	IN	PTR	worker-1.${CLUSTER_NAME}.${BASE_DOMAIN}.
-; IPI-END ${CLUSTER_NAME}
-;EOF
-DNS_REV
-
-# Bump serial on main zone files and reload
-update_dns_serial
-systemctl reload named
-echo "DNS records added and named reloaded."
-
-# Verify DNS
-sleep 1
-echo "Verifying DNS..."
+echo "=== Verifying DNS records ==="
+# DNS is static in forward.example.com — slots ipi1/ipi2/ipi3 pre-configured.
 for record in "api.${CLUSTER_NAME}.${BASE_DOMAIN}" "*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}"; do
     resolved=$(dig +short "$record" @127.0.0.1 2>/dev/null || true)
     if [ -n "$resolved" ]; then
         echo "  $record -> $resolved"
     else
-        echo "  WARN: $record did not resolve — check named config"
+        echo "  ERROR: $record did not resolve — check /var/named/forward.example.com"
+        exit 1
     fi
 done
 
