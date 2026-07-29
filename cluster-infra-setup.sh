@@ -127,8 +127,6 @@ add_zone_if_missing() {
     local zone_name=$1
     local zone_file=$2
     local _zone_type=$3
-    local zone_basename
-    zone_basename=$(basename "$zone_file")
 
     if grep -q "\"${zone_name}\"" "$NAMED_ZONES" 2>/dev/null; then
         # Zone declared — ensure file directive points to our filename
