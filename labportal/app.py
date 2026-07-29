@@ -236,6 +236,26 @@ def get_dhcp_host_map():
     except Exception:
         pass
 
+    # IPI bootstrap VMs get dynamic IPs — query ARP for any running bootstrap VM
+    try:
+        result = subprocess.run(["virsh", "list", "--name", "--state-running"],
+                                capture_output=True, text=True, timeout=5)
+        for vm_name in result.stdout.splitlines():
+            vm_name = vm_name.strip()
+            if not vm_name or "-bootstrap" not in vm_name:
+                continue
+            arp = subprocess.run(
+                ["virsh", "domifaddr", vm_name, "--source", "arp"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in arp.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[2] == "ipv4":
+                    mapping[vm_name] = parts[3].split("/")[0]
+                    break
+    except Exception:
+        pass
+
     # SNO VMs use static IPs from config — no virsh query needed
     try:
         with get_db_ctx() as conn:
@@ -1174,6 +1194,20 @@ def create_linux_user(username, first_name, last_name):
                     dst.write(pub_data)
                 os.chmod(user_pub, 0o644)
             subprocess.run(["chown", "-R", f"{username}:{username}", user_ssh_dir],
+                           capture_output=True, timeout=5)
+            # Write SSH config so cluster node access works without flags
+            ssh_config = os.path.join(user_ssh_dir, "config")
+            key_name = os.path.basename(ssh_key_file)
+            config_content = (
+                f"Host 192.168.122.*\n"
+                f"    IdentityFile ~/.ssh/{key_name}\n"
+                f"    User core\n"
+                f"    StrictHostKeyChecking no\n"
+            )
+            with open(ssh_config, "w") as f:
+                f.write(config_content)
+            os.chmod(ssh_config, 0o644)
+            subprocess.run(["chown", "root:root", ssh_config],
                            capture_output=True, timeout=5)
         except Exception as e:
             errors.append(f"SSH key copy: {e}")
