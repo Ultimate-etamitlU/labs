@@ -2213,7 +2213,7 @@ def _orphan_bootstrap_reaper():
             app.logger.error("orphan_bootstrap_reaper error: %s", e)
 
 
-DEPLOY_MAX_AGE_SECS = int(os.environ.get("LABPORTAL_DEPLOY_MAX_AGE", "5400"))  # 90 min
+DEPLOY_MAX_AGE_SECS = int(os.environ.get("LABPORTAL_DEPLOY_MAX_AGE", "28800"))  # 8 hours
 
 
 def _deploy_watchdog():
@@ -2221,7 +2221,8 @@ def _deploy_watchdog():
 
     Guards against a deploy that hangs mid-way, which would otherwise leave the
     row stuck in 'deploying' and the slot occupied until its reservation expires.
-    Also destroys any VMs that were partially created during the failed deploy.
+    Only kills if the cluster's bootstrap VM is still running — if bootstrap is
+    gone the install either completed or died on its own, so leave it alone.
     """
     while True:
         time.sleep(300)
@@ -2235,10 +2236,26 @@ def _deploy_watchdog():
                 ).fetchall()
             if not stuck:
                 continue
+            # Only kill if bootstrap VM still running — if gone, install completed or died on its own.
+            try:
+                _vr = subprocess.run(
+                    ["virsh", "list", "--name"], capture_output=True, text=True, timeout=10
+                )
+                _running_vms = _vr.stdout.strip().splitlines()
+            except Exception:
+                _running_vms = []
             _, clusters, _ = get_lab_status()
             for row in stuck:
                 name = row["cluster_name"]
                 pid = row["pid"]
+                bootstrap_running = any(
+                    name in vm and "-bootstrap" in vm for vm in _running_vms
+                )
+                if not bootstrap_running:
+                    app.logger.info(
+                        "deploy_watchdog: %s past %dh but no bootstrap VM — skipping",
+                        name, DEPLOY_MAX_AGE_SECS // 3600)
+                    continue
                 if pid:
                     # Deploy runs in its own session (start_new_session=True);
                     # signal the whole process group.
@@ -2252,7 +2269,7 @@ def _deploy_watchdog():
                         "INSERT INTO activity_log (event, user_email, ip_address, details) "
                         "VALUES (?, ?, ?, ?)",
                         ("deploy_timeout", "system", "127.0.0.1",
-                         f"{name} killed after >{DEPLOY_MAX_AGE_SECS // 60}min"))
+                         f"{name} killed after >{DEPLOY_MAX_AGE_SECS // 3600}h (bootstrap still running)"))
                     conn.commit()
         except Exception as e:
             app.logger.error("deploy_watchdog error: %s", e)
