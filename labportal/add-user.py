@@ -70,6 +70,54 @@ def main():
     subprocess.run(["chpasswd"], input=f"{args.linux_username}:{args.password}", text=True, check=True)
     print(f"Linux password set for: {args.linux_username}")
 
+    # Add to labusers group for cluster kubeconfig access
+    subprocess.run(["usermod", "-aG", "labusers", args.linux_username], check=True)
+    print(f"Added to labusers group: {args.linux_username}")
+
+    # Set up SSH key + config for cluster VM access (192.168.122.*)
+    home = f"/home/{args.linux_username}"
+    ssh_dir = os.path.join(home, ".ssh")
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+
+    lab_key_src = "/etc/labusers/id_ed25519"
+    lab_key_dst = os.path.join(ssh_dir, "id_rsa_lab")
+    if os.path.exists(lab_key_src):
+        import shutil
+        shutil.copy2(lab_key_src, lab_key_dst)
+        os.chmod(lab_key_dst, 0o600)
+        print(f"Lab SSH key installed: {lab_key_dst}")
+    else:
+        print(f"WARNING: {lab_key_src} not found — SSH to cluster VMs will fail")
+
+    ssh_config = os.path.join(ssh_dir, "config")
+    cluster_block = """Host 192.168.122.*
+    IdentityFile ~/.ssh/id_rsa_lab
+    User core
+    StrictHostKeyChecking no
+"""
+    if os.path.exists(ssh_config):
+        with open(ssh_config) as f:
+            existing = f.read()
+        if "id_rsa_lab" not in existing:
+            with open(ssh_config, "a") as f:
+                f.write("\n" + cluster_block)
+            print(f"Appended cluster SSH config to: {ssh_config}")
+        else:
+            print(f"SSH config already has cluster block: {ssh_config}")
+    else:
+        with open(ssh_config, "w") as f:
+            f.write(cluster_block)
+        print(f"Created SSH config: {ssh_config}")
+
+    # Fix ownership — entire .ssh dir belongs to the user
+    import pwd
+    pw = pwd.getpwnam(args.linux_username)
+    for dirpath, dirnames, filenames in os.walk(ssh_dir):
+        os.chown(dirpath, pw.pw_uid, pw.pw_gid)
+        for fn in filenames:
+            os.chown(os.path.join(dirpath, fn), pw.pw_uid, pw.pw_gid)
+    print(f"SSH dir ownership set to {args.linux_username}")
+
 
 if __name__ == "__main__":
     main()
