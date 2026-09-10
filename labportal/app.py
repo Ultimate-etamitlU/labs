@@ -336,8 +336,8 @@ def get_cluster_reservations():
 
 
 def get_deployment_queue():
-    """Return queued and active deployment jobs for the dashboard."""
-    statuses = sql_statuses((QUEUED_STATUS, STARTING_STATUS, DEPLOYING_STATUS, "stale"))
+    """Return pending/running jobs; leave stale rows for reconciliation/audit."""
+    statuses = sql_statuses((QUEUED_STATUS, STARTING_STATUS, DEPLOYING_STATUS))
     with get_db_ctx() as conn:
         rows = conn.execute(
             f"SELECT id, cluster_name, ocp_version, install_type, status, started_by, "
