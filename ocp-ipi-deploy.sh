@@ -594,7 +594,7 @@ openshift-install create cluster --dir=. --log-level=info
 # Ironic creates disks as root:root, but libvirt needs qemu:qemu access.
 echo ""
 echo "=== Fixing disk ownership (created by Ironic) ==="
-for disk in "$STORAGE_DIR/kvm_images/${VM_PREFIX}-*.qcow2"; do
+for disk in "$STORAGE_DIR"/kvm_images/"${VM_PREFIX}"-*.qcow2; do
     [ -f "$disk" ] && chown qemu:qemu "$disk" && chmod 600 "$disk" && echo "Fixed: $disk"
 done
 
