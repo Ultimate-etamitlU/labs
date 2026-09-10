@@ -230,10 +230,27 @@ if [ "$preflight_ok" = false ]; then
     exit 1
 fi
 
-# Ensure VBMC UDP ports are open in the libvirt firewall zone
-firewall-cmd --zone=libvirt --query-port=${VBMC_PORT_BASE}-$(( VBMC_PORT_BASE + TOTAL_NODES - 1 ))/udp &>/dev/null || \
-    firewall-cmd --zone=libvirt --add-port=${VBMC_PORT_BASE}-$(( VBMC_PORT_BASE + TOTAL_NODES - 1 ))/udp --permanent &>/dev/null
-firewall-cmd --zone=libvirt --add-port=${VBMC_PORT_BASE}-$(( VBMC_PORT_BASE + TOTAL_NODES - 1 ))/udp &>/dev/null || true
+# Ensure VBMC UDP ports are open in the libvirt firewall zone when firewalld
+# is in use.  Some lab hosts intentionally run without firewalld; in that
+# case firewall-cmd returns 252 and must not abort an otherwise valid deploy.
+VBMC_PORT_RANGE="${VBMC_PORT_BASE}-$(( VBMC_PORT_BASE + TOTAL_NODES - 1 ))/udp"
+if ! systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo "WARN: firewalld is inactive; skipping firewall rule for VBMC ports ${VBMC_PORT_RANGE}."
+elif ! command -v firewall-cmd &>/dev/null; then
+    echo "FAIL: firewalld is active but firewall-cmd is not available."
+    exit 1
+else
+    if ! firewall-cmd --zone=libvirt --query-port="$VBMC_PORT_RANGE" &>/dev/null; then
+        if ! firewall-cmd --zone=libvirt --add-port="$VBMC_PORT_RANGE" --permanent &>/dev/null; then
+            echo "FAIL: unable to configure libvirt firewall port ${VBMC_PORT_RANGE}."
+            exit 1
+        fi
+    fi
+    if ! firewall-cmd --zone=libvirt --add-port="$VBMC_PORT_RANGE" &>/dev/null; then
+        echo "FAIL: unable to activate libvirt firewall port ${VBMC_PORT_RANGE}."
+        exit 1
+    fi
+fi
 
 echo "=== Pre-flight checks passed ==="
 echo ""
