@@ -7,7 +7,7 @@
 [![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask)](.)
 [![PatternFly](https://img.shields.io/badge/PatternFly-5-004080)](https://www.patternfly.org)
 
-A self-service web portal and automation toolkit for deploying and managing OpenShift 4.x clusters on a shared KVM/libvirt host. Supports multiple installation methods (UPI and IPI baremetal) with resource-aware dynamic slot management and automatic cluster lifecycle enforcement. Users deploy clusters from the browser with a mandatory lifetime — DNS, HAProxy/keepalived, DHCP, VMs, and ignition are all handled automatically.
+A self-service web portal and automation toolkit for deploying and managing OpenShift 4.x clusters on a shared KVM/libvirt host. Supports multiple installation methods (UPI and IPI baremetal) with resource-aware fixed-slot management and automatic cluster lifecycle enforcement. Users deploy clusters from the browser with a mandatory lifetime — DNS, HAProxy/keepalived, DHCP, VMs, and ignition are all handled automatically.
 
 ## Architecture
 
@@ -149,7 +149,13 @@ Every cluster has a mandatory **lifetime** set at deploy time. When the lifetime
 
 ## Installation Methods
 
-All clusters use **OVNKubernetes** as the network plugin. Resource availability (CPU, RAM) is checked before each deployment — deploys are blocked if insufficient resources are available.
+All clusters use **OVNKubernetes** as the network plugin. Resource availability (CPU, RAM) is checked before each deployment. Requests that can fit on the host are retained in the durable deployment queue when the host or another installation is busy.
+
+### Deployment admission and queue
+
+The portal admits only one installer process at a time across UPI, IPI, and SNO. This protects the shared host from overlapping bootstrap activity while preserving requests instead of rejecting them. The scheduler claims queued work transactionally, so a portal restart or a second portal worker cannot start two installers concurrently. Requests are handled FIFO; a head request that is waiting for capacity keeps later requests behind it.
+
+The queue is visible only while a request is queued or an installer is running. Each queued request shows its position and the reason it is waiting. When the active IPI reservation has a valid expiry, the portal shows a conservative start estimate that includes a cleanup buffer; otherwise it reports that the ETA is unavailable and provides a **Request admin review** action. The action sends an auditable message to the portal admin and never bypasses the queue or releases a cluster.
 
 ### UPI (User Provisioned Infrastructure)
 
@@ -165,7 +171,7 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 
 ### IPI (Installer Provisioned Infrastructure — Baremetal)
 
-3 fixed slots, each with a 15-IP block. Portal auto-assigns the next free slot.
+3 fixed DNS-backed slots, each with a 15-IP block. The user selects the slot from the portal; the request is queued if the slot or the shared IPI capacity is occupied.
 
 | Slot | Range | API VIP | Ingress VIP | Masters | Workers | Spare |
 |------|-------|---------|-------------|---------|---------|-------|
@@ -173,7 +179,7 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 | `ipi2` | `.215–.229` | `.215` | `.216` | `.217–.219` | `.220–.224` | `.225–.229` |
 | `ipi3` | `.230–.244` | `.230` | `.231` | `.232–.234` | `.235–.239` | `.240–.244` |
 
-`.245–.254` reserved as buffer. All IPs on `192.168.122.0/24`.
+`.245–.254` reserved as buffer. Cluster service and node IPs are on `192.168.122.0/24`; IPI provisioning traffic uses the separate `provisioning` network described below.
 
 | Component | Details |
 |-----------|---------|
@@ -309,6 +315,8 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_HOSTNAME` | `lab.example.com` | Hostname shown in UI |
 | `LABPORTAL_UPI_SCRIPT` | `/root/labs/ocp-upi-deploy.sh` | Path to UPI deploy script |
 | `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | Path to IPI deploy script |
+| `LABPORTAL_QUEUE_INTERVAL` | `10` seconds | Scheduler poll interval |
+| `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
 | `CLUSTERS_DIR` | `/kvm/clusters` | Directory where cluster artifacts are stored |
 | `PULL_SECRET_FILE` | `/root/pull-secret.txt` | Path to OpenShift pull secret |
 | `SSH_KEY_FILE` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
@@ -327,18 +335,24 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 | Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
 | SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity, forced password change on first login |
 
+IPI also uses a shared provisioning network for DHCP/PXE, Ironic, and virtual BMC communication. In this lab that provisioning plane supports one active IPI cluster at a time. The `ipi1`, `ipi2`, and `ipi3` service-IP blocks remain available for queued requests, but IPI requests are not launched in parallel. A deployment is admitted only after the current installer has finished and, for another IPI cluster, the active IPI reservation has expired and cleanup has completed.
+
+For a larger environment, concurrent IPI installations require isolated provisioning networks and independently coordinated DHCP/PXE/Ironic/BMC state per cluster, or an explicitly multi-tenant provisioning service. A shared data or bare-metal network alone is not sufficient isolation for concurrent provisioning.
+
 ## Usage
 
 ### Deploy a Cluster
 
 1. Log in to the portal
 2. Select an install type (UPI or IPI)
-3. For UPI: select an available cluster slot; for IPI: enter a cluster name
+3. For UPI: select an available cluster slot; for IPI: select one of the predefined `ipi1`, `ipi2`, or `ipi3` slots
 4. Enter the OCP version (e.g., `4.20.5`) — version is validated against the OCP mirror
 5. Set the **cluster lifetime** (3 hours to 1 week) — the cluster will be auto-deleted when this expires
 6. Optionally enter a purpose description
-7. Click **Deploy Cluster** — resource availability is checked before launching
+7. Click **Deploy Cluster** — the request is admitted immediately when safe, otherwise retained in the deployment queue
 8. Monitor progress via **View Logs**
+
+Queued requests show their position and an estimated start time when the current IPI reservation has a known expiry. Estimates are intentionally conservative and can be unavailable when an installer or stale state has no trustworthy completion time. Use **Request admin review** for an urgent request; administrators decide whether it can be scheduled sooner.
 
 ### Extend a Cluster Beyond 1 Week
 
@@ -378,8 +392,9 @@ Click **Delete Cluster** in the portal dashboard (or wait for the lifetime to ex
 | **User Management** | Admin creates accounts with auto-generated passwords; Linux user creation with group-based access; enable/disable toggle; `add-user.py` CLI for reliable user + Linux account creation in one command |
 | **Unified Login** | Single login page for users and admins; admin privileges granted via `is_admin` flag |
 | **Password Reset** | Self-service forgot password flow; admin-approved reset with forced password change |
-| **Install Types** | UPI (fixed slots, HAProxy) and IPI baremetal (dynamic names, VBMC/ironic, keepalived) |
-| **Resource Check** | Validates CPU/RAM availability before deploying; blocks if insufficient |
+| **Install Types** | UPI (fixed slots, HAProxy) and IPI baremetal (fixed DNS-backed slots, VBMC/Ironic, keepalived) |
+| **Resource Check** | Validates whether a request can fit on the host; busy capacity is handled by the durable queue |
+| **Deployment Queue** | One installer process globally; queued requests show position, safe ETA when available, and admin-review escalation |
 | **Version Validation** | Checks OCP version exists on the mirror before starting deployment |
 | **Cluster Deploy** | One-click deploy with install type picker, detached process |
 | **Cluster Delete** | Admin: any cluster. Users: only their own. Cleans up VMs, storage, VBMC, DNS, DB records |
@@ -406,8 +421,8 @@ Bootstrap VM is automatically destroyed after bootstrap-complete to reclaim reso
 
 | Role | Count | RAM | vCPUs | Disk | VM Name |
 |------|-------|-----|-------|------|---------|
-| Master | 3 | 32 GB | 8 | 120 GB | `vm-<name>-master-{0,1,2}` |
-| Worker | 2 | 16 GB | 4 | 120 GB | `vm-<name>-worker-{0,1}` |
+| Master | 3 | 32 GB | 8 | 120 GB | `vm-<slot>-master-{0,1,2}` |
+| Worker | 2 | 16 GB | 4 | 120 GB | `vm-<slot>-worker-{0,1}` |
 
 Bootstrap VM is created and destroyed automatically by `openshift-install`.
 

@@ -211,6 +211,9 @@
     <div class="dash-card-header">
         <h2>Deployment Queue</h2>
     </div>
+    <p style="margin:0 1rem 0.75rem;color:#8a8d90;font-size:0.82rem;">
+        Installations are admitted one at a time. IPI requests also wait for the active IPI slot to expire and be cleaned up.
+    </p>
     <div id="deployment-queue-container">
         {% for job in deployment_queue %}
         <div class="cluster-group" style="padding:0.75rem 1rem; margin-bottom:0.5rem;">
@@ -223,6 +226,11 @@
                 <span class="cluster-badge" style="background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;">
                     {{ job.install_type|upper }} / OCP {{ job.ocp_version }}
                 </span>
+                {% if job.status == 'queued' %}
+                <span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">
+                    Queue position {{ job.queue_position }}
+                </span>
+                {% endif %}
                 {% if job.status == 'queued' and (session.get('admin') or job.started_by == session.get('user_email')) %}
                 <div class="cluster-actions">
                     <form method="post" action="{{ url_for('cluster_delete') }}"
@@ -232,9 +240,25 @@
                             Cancel Queue
                         </button>
                     </form>
+                    <form method="post" action="{{ url_for('request_deployment_review') }}">
+                        <input type="hidden" name="cluster_name" value="{{ job.cluster_name }}">
+                        <button type="submit" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">
+                            Request admin review
+                        </button>
+                    </form>
                 </div>
                 {% endif %}
             </div>
+            {% if job.status == 'queued' %}
+            <div style="margin-top:0.35rem;color:#8a8d90;font-size:0.8rem;">
+                {{ job.blocking_reason }}
+                {% if job.eta_at %}
+                Estimated start: {{ job.eta_at|replace('T', ' ')|replace('Z', ' UTC') }}.
+                {% else %}
+                ETA unavailable — request admin review if this is urgent.
+                {% endif %}
+            </div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -558,12 +582,29 @@ document.addEventListener('keydown', function(e) {
                 const queue = data.deployment_queue || [];
                 if (queueCard && queueContainer) {
                     queueCard.style.display = queue.length ? '' : 'none';
+                    const escapeQueueText = function(value) {
+                        return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+                            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+                        });
+                    };
                     queueContainer.innerHTML = queue.map(function(job) {
-                        const canCancel = job.status === 'queued' && (IS_ADMIN || job.started_by === CURRENT_USER);
-                        const cancel = canCancel
-                            ? '<div class="cluster-actions"><form method="post" action="/labs/cluster/delete" onsubmit="return confirm(\'Cancel queued deployment ' + job.cluster_name + '?\');"><input type="hidden" name="cluster_name" value="' + job.cluster_name + '"><button type="submit" class="pf-v5-c-button pf-m-danger pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">Cancel Queue</button></form></div>'
+                        const name = escapeQueueText(job.cluster_name);
+                        const canReview = job.status === 'queued' && (IS_ADMIN || job.started_by === CURRENT_USER);
+                        const cancel = canReview
+                            ? '<form method="post" action="/labs/cluster/delete" onsubmit="return confirm(\'Cancel queued deployment ' + name + '?\');"><input type="hidden" name="cluster_name" value="' + name + '"><button type="submit" class="pf-v5-c-button pf-m-danger pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">Cancel Queue</button></form>'
                             : '';
-                        return '<div class="cluster-group" style="padding:0.75rem 1rem;margin-bottom:0.5rem;"><div class="cluster-header"><span class="cluster-dot"></span><span class="cluster-name">' + job.cluster_name + '</span><span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">' + job.status.charAt(0).toUpperCase() + job.status.slice(1) + '</span><span class="cluster-badge" style="background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;">' + job.install_type.toUpperCase() + ' / OCP ' + job.ocp_version + '</span>' + cancel + '</div></div>';
+                        const review = canReview
+                            ? '<form method="post" action="/labs/cluster/request-review"><input type="hidden" name="cluster_name" value="' + name + '"><button type="submit" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">Request admin review</button></form>'
+                            : '';
+                        const actions = cancel || review ? '<div class="cluster-actions">' + cancel + review + '</div>' : '';
+                        const position = job.status === 'queued' && job.queue_position ? '<span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">Queue position ' + job.queue_position + '</span>' : '';
+                        const eta = job.eta_at
+                            ? 'Estimated start: ' + escapeQueueText(job.eta_at.replace('T', ' ').replace('Z', ' UTC')) + '.'
+                            : 'ETA unavailable — request admin review if this is urgent.';
+                        const details = job.status === 'queued'
+                            ? '<div style="margin-top:0.35rem;color:#8a8d90;font-size:0.8rem;">' + escapeQueueText(job.blocking_reason) + ' ' + eta + '</div>'
+                            : '';
+                        return '<div class="cluster-group" style="padding:0.75rem 1rem;margin-bottom:0.5rem;"><div class="cluster-header"><span class="cluster-dot"></span><span class="cluster-name">' + name + '</span><span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">' + escapeQueueText(job.status.charAt(0).toUpperCase() + job.status.slice(1)) + '</span><span class="cluster-badge" style="background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;">' + escapeQueueText(job.install_type.toUpperCase()) + ' / OCP ' + escapeQueueText(job.ocp_version) + '</span>' + position + actions + '</div>' + details + '</div>';
                     }).join('');
                 }
 
