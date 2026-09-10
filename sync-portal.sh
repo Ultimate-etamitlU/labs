@@ -1,11 +1,13 @@
 #!/bin/bash
 # sync-portal.sh — Pull latest labs repo and restart labportal if needed.
 # Runs as a systemd service triggered nightly at midnight.
-# Safe during active deploys — skips restart if cluster deployment is in progress.
+# Safe during active deploys — skips restart if queued/starting/deploying work is in progress.
+# A persistent marker defers the restart until a later sync after the queue drains.
 set -euo pipefail
 
 REPO_DIR="/root/labs"
 DB_PATH="/root/labs/labportal/labportal.db"
+PENDING_RESTART="/var/lib/labportal-sync.pending"
 LOG_TAG="sync-portal"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $*"; }
@@ -20,21 +22,21 @@ git fetch origin main --quiet
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
 
-if [ "$LOCAL" = "$REMOTE" ]; then
-    log "Already up to date ($LOCAL). Nothing to do."
-    exit 0
+CHANGED=""
+if [ "$LOCAL" != "$REMOTE" ]; then
+    log "New commits available: $LOCAL -> $REMOTE"
+
+    # Identify which files changed between current HEAD and origin/main
+    CHANGED=$(git diff --name-only HEAD origin/main)
+    log "Changed files:"
+    echo "$CHANGED" | sed 's/^/  /'
+
+    # Pull
+    git pull --ff-only origin main
+    log "Pull complete"
+else
+    log "Already up to date ($LOCAL)."
 fi
-
-log "New commits available: $LOCAL -> $REMOTE"
-
-# Identify which files changed between current HEAD and origin/main
-CHANGED=$(git diff --name-only HEAD origin/main)
-log "Changed files:"
-echo "$CHANGED" | sed 's/^/  /'
-
-# Pull
-git pull --ff-only origin main
-log "Pull complete"
 
 # Check if any portal-relevant file changed
 PORTAL_CHANGED=false
@@ -47,9 +49,19 @@ while IFS= read -r f; do
     esac
 done <<< "$CHANGED"
 
+if [ "$PORTAL_CHANGED" = false ] && [ -f "$PENDING_RESTART" ]; then
+    log "A portal restart is pending from an earlier sync."
+    PORTAL_CHANGED=true
+fi
+
 if [ "$PORTAL_CHANGED" = false ]; then
     log "No portal-relevant files changed. Skipping restart."
     exit 0
+fi
+
+if [ "$LOCAL" != "$REMOTE" ]; then
+    # The source is now on disk; remember to restart once active work drains.
+    : > "$PENDING_RESTART"
 fi
 
 log "Portal-relevant files changed. Checking for active deployments..."
@@ -59,7 +71,7 @@ if [ -f "$DB_PATH" ]; then
     ACTIVE=$(python3 -c "
 import sqlite3
 db = sqlite3.connect('$DB_PATH')
-count = db.execute(\"SELECT COUNT(*) FROM deployments WHERE status='deploying'\").fetchone()[0]
+count = db.execute(\"SELECT COUNT(*) FROM deployments WHERE status IN ('queued','starting','deploying')\").fetchone()[0]
 print(count)
 ")
     if [ "$ACTIVE" -gt 0 ]; then
@@ -70,4 +82,5 @@ fi
 
 log "No active deployments. Restarting labportal..."
 systemctl restart labportal
+rm -f "$PENDING_RESTART"
 log "labportal restarted successfully."
