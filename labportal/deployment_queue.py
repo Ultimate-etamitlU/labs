@@ -70,13 +70,26 @@ def ensure_schema(conn):
 def claim_job(conn, job_id, worker_id):
     """Atomically move one queued job to ``starting`` and return its row.
 
-    ``None`` means another worker changed the job before this transaction
-    acquired the write lock.
+    The lab has one shared installation environment, so the same transaction
+    also rejects a claim while another installer is already starting or
+    deploying.  Keeping this check inside ``BEGIN IMMEDIATE`` makes the guard
+    effective across multiple portal workers and after a portal restart.
+
+    ``None`` means another worker changed the job, or the global installation
+    guard is currently occupied.
     """
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
+        running = conn.execute(
+            "SELECT 1 FROM deployments "
+            f"WHERE status IN ({running_statuses_sql()}) AND id != ? LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if running:
+            conn.rollback()
+            return None
         cursor = conn.execute(
             "UPDATE deployments "
             "SET status=?, claimed_at=CURRENT_TIMESTAMP, heartbeat_at=CURRENT_TIMESTAMP, "

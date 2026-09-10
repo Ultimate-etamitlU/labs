@@ -34,7 +34,7 @@ class DeploymentQueueSchemaTests(unittest.TestCase):
         self.assertIn("failure_reason", columns)
         self.assertIn("process_group", columns)
 
-    def test_claim_is_atomic_and_only_claims_queued_rows(self):
+    def test_claim_is_globally_serialized_and_only_claims_queued_rows(self):
         self.conn.execute(
             "INSERT INTO deployments (cluster_name, ocp_version, status, queued_at) "
             "VALUES ('upi1', '4.19.22', 'queued', CURRENT_TIMESTAMP)"
@@ -43,6 +43,12 @@ class DeploymentQueueSchemaTests(unittest.TestCase):
             "INSERT INTO deployments (cluster_name, ocp_version, status) "
             "VALUES ('upi2', '4.19.22', 'deploying')"
         )
+        self.conn.commit()
+
+        claimed = claim_job(self.conn, 1, "worker-a")
+        self.assertIsNone(claimed)
+
+        self.conn.execute("UPDATE deployments SET status='completed' WHERE id=2")
         self.conn.commit()
 
         claimed = claim_job(self.conn, 1, "worker-a")

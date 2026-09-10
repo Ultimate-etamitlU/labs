@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
@@ -113,6 +113,12 @@ DEPLOYMENT_QUEUE_INTERVAL_SECS = int(
 )
 DEPLOYMENT_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 DEPLOYMENT_EXIT_SUFFIX = ".exit"
+# The active IPI cluster keeps the shared provisioning/Ironic plane occupied
+# until its reservation expires.  Leave a small operator-controlled buffer for
+# cleanup before admitting the next IPI request.
+IPI_CLEANUP_BUFFER_SECS = int(
+    os.environ.get("LABPORTAL_IPI_CLEANUP_BUFFER_SECS", "900")
+)
 
 
 # --- Helpers ---
@@ -238,6 +244,10 @@ CLUSTER_IP_RANGES = {
 
 _ACTIVE_DEPLOYMENT_SQL = sql_statuses(ACTIVE_DEPLOYMENT_STATUSES)
 _RUNNING_DEPLOYMENT_SQL = running_statuses_sql()
+_IPI_OCCUPIED_STATUSES = tuple(
+    status for status in ACTIVE_DEPLOYMENT_STATUSES if status != QUEUED_STATUS
+)
+_IPI_OCCUPIED_SQL = sql_statuses(_IPI_OCCUPIED_STATUSES)
 
 
 def get_dhcp_host_map():
@@ -335,17 +345,104 @@ def get_cluster_reservations():
     }
 
 
+def _parse_queue_timestamp(value):
+    """Parse a SQLite UTC timestamp, treating sentinel dates as unknown."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo:
+        parsed = parsed.replace(tzinfo=None)
+    if parsed.year >= 9999:
+        return None
+    return parsed
+
+
+def _ipi_queue_eta(reserved_until):
+    """Return a conservative IPI start estimate after expiry and cleanup."""
+    expiry = _parse_queue_timestamp(reserved_until)
+    if not expiry:
+        return None
+    return (expiry + timedelta(seconds=IPI_CLEANUP_BUFFER_SECS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
 def get_deployment_queue():
-    """Return pending/running jobs; leave stale rows for reconciliation/audit."""
+    """Return visible queue jobs with safe position/blocking metadata.
+
+    Completed/stale deployment rows remain in the database for audit, but are
+    intentionally not shown here.  A completed IPI row can still occupy the
+    shared provisioning plane until its cluster reservation expires.
+    """
     statuses = sql_statuses((QUEUED_STATUS, STARTING_STATUS, DEPLOYING_STATUS))
     with get_db_ctx() as conn:
         rows = conn.execute(
-            f"SELECT id, cluster_name, ocp_version, install_type, status, started_by, "
-            f"queued_at, started_at, claimed_at, failure_reason "
-            f"FROM deployments WHERE status IN ({statuses}) "
-            "ORDER BY COALESCE(queued_at, started_at), id"
+            f"SELECT d.id, d.cluster_name, d.ocp_version, d.install_type, d.status, "
+            f"d.started_by, d.queued_at, d.started_at, d.claimed_at, d.failure_reason "
+            f"FROM deployments d "
+            f"WHERE d.status IN ({statuses}) "
+            "ORDER BY COALESCE(d.queued_at, d.started_at), d.id"
         ).fetchall()
-    return [dict(row) for row in rows]
+        active_ipi = conn.execute(
+            f"SELECT d.id, d.cluster_name, d.status, r.reserved_until "
+            f"FROM deployments d LEFT JOIN cluster_reservations r "
+            f"ON r.cluster_name=d.cluster_name "
+            f"WHERE d.install_type='ipi' AND d.status IN ({_IPI_OCCUPIED_SQL}) "
+            "ORDER BY d.id LIMIT 1"
+        ).fetchone()
+        running = conn.execute(
+            f"SELECT cluster_name, install_type FROM deployments "
+            f"WHERE status IN ({_RUNNING_DEPLOYMENT_SQL}) "
+            "ORDER BY COALESCE(started_at, claimed_at), id LIMIT 1"
+        ).fetchone()
+
+    queue = []
+    queued_position = 0
+    for row in rows:
+        job = dict(row)
+        job["queue_position"] = None
+        job["eta_at"] = None
+        job["blocking_reason"] = ""
+        job["admin_review_required"] = False
+
+        if job["status"] == QUEUED_STATUS:
+            queued_position += 1
+            job["queue_position"] = queued_position
+            if running:
+                job["blocking_reason"] = (
+                    f"Waiting for {running['install_type'].upper()} deployment "
+                    f"{running['cluster_name']} to finish."
+                )
+            elif job["install_type"] == "ipi" and active_ipi:
+                if queued_position == 1:
+                    job["eta_at"] = _ipi_queue_eta(active_ipi["reserved_until"])
+                if job["eta_at"]:
+                    job["blocking_reason"] = (
+                        f"Waiting for active IPI cluster {active_ipi['cluster_name']} "
+                        "to expire and be cleaned up."
+                    )
+                elif queued_position > 1:
+                    job["blocking_reason"] = (
+                        "Waiting for earlier queued requests and active IPI capacity."
+                    )
+                else:
+                    job["blocking_reason"] = (
+                        "Waiting for active IPI capacity; reservation expiry is unknown."
+                    )
+            elif queued_position > 1:
+                job["blocking_reason"] = "Waiting for earlier queued requests."
+            else:
+                job["blocking_reason"] = "Next eligible request."
+
+            job["admin_review_required"] = not bool(job["eta_at"])
+        elif job["status"] in (STARTING_STATUS, DEPLOYING_STATUS):
+            job["blocking_reason"] = "Installer is running."
+
+        queue.append(job)
+    return queue
 
 
 def _write_reservation_file():
@@ -1426,17 +1523,22 @@ def _check_resources(install_type):
     return True, "OK"
 
 
-def _check_ipi_concurrency(deployment_id):
-    """IPI deployments must be serialized (shared bootstrap + Ironic). Return False if another IPI is running."""
+def _check_ipi_capacity(deployment_id):
+    """Keep one IPI cluster on the shared provisioning/Ironic plane."""
     with get_db_ctx() as conn:
-        running_ipi = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM deployments "
-            f"WHERE install_type='ipi' AND status IN ({_RUNNING_DEPLOYMENT_SQL}) "
-            f"AND id != ?",
+        occupied_ipi = conn.execute(
+            f"SELECT d.cluster_name, d.status, r.reserved_until FROM deployments d "
+            f"LEFT JOIN cluster_reservations r ON r.cluster_name=d.cluster_name "
+            f"WHERE d.install_type='ipi' AND d.status IN ({_IPI_OCCUPIED_SQL}) "
+            f"AND d.id != ? ORDER BY d.id LIMIT 1",
             (deployment_id,)
         ).fetchone()
-    if running_ipi["cnt"] > 0:
-        return False, "Another IPI deployment is in progress; IPI deploys must be serialized"
+    if occupied_ipi:
+        expiry = occupied_ipi["reserved_until"] or "unknown"
+        return False, (
+            f"IPI capacity is occupied by {occupied_ipi['cluster_name']} "
+            f"({occupied_ipi['status']}, reservation ends {expiry})"
+        )
     return True, "OK"
 
 
@@ -1680,6 +1782,66 @@ def cluster_create():
         app.logger.error("Failed to queue deployment for %s: %s", cluster_name, e)
         flash("Failed to queue deployment. Please try again.", "danger")
 
+    return redirect(url_for("user_dashboard"))
+
+
+@app.route("/cluster/request-review", methods=["POST"])
+@login_required
+def request_deployment_review():
+    """Ask an administrator to review a queued deployment.
+
+    This records a normal admin feedback item.  It never changes queue state,
+    bypasses the scheduler, or releases an occupied cluster/slot.
+    """
+    cluster_name = request.form.get("cluster_name", "").strip()
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    with get_db_ctx() as conn:
+        deployment = conn.execute(
+            "SELECT cluster_name, install_type, ocp_version, status, started_by "
+            "FROM deployments WHERE cluster_name=? AND status=? "
+            "ORDER BY id DESC LIMIT 1",
+            (cluster_name, QUEUED_STATUS),
+        ).fetchone()
+    if not deployment:
+        flash(f"Queued deployment '{cluster_name}' is no longer pending.", "warning")
+        return redirect(url_for("user_dashboard"))
+    if not session.get("admin") and deployment["started_by"] != session.get("user_email"):
+        abort(403)
+
+    queue_job = next(
+        (job for job in get_deployment_queue() if job["cluster_name"] == cluster_name),
+        None,
+    )
+    position = queue_job.get("queue_position") if queue_job else None
+    eta = queue_job.get("eta_at") if queue_job else None
+    eta_text = eta or "unavailable; admin review is required"
+    position_text = str(position) if position else "unknown"
+    message = (
+        f"Deployment review requested for queued {deployment['install_type'].upper()} "
+        f"cluster '{cluster_name}' (OCP {deployment['ocp_version']}). "
+        f"Queue position: {position_text}. Estimated start: {eta_text}. "
+        "Please review whether the request can be scheduled sooner; do not "
+        "bypass the deployment guard or release an active cluster."
+    )
+
+    with get_db_ctx() as conn:
+        duplicate = conn.execute(
+            "SELECT 1 FROM feedback WHERE submitted_by=? AND is_read=0 "
+            "AND message LIKE ? LIMIT 1",
+            (session["user_email"], f"Deployment review requested%'{cluster_name}'%"),
+        ).fetchone()
+        if duplicate:
+            flash("An admin review request is already pending for this deployment.", "info")
+            return redirect(url_for("user_dashboard"))
+        conn.execute(
+            "INSERT INTO feedback (submitted_by, message) VALUES (?, ?)",
+            (session["user_email"], message),
+        )
+        conn.commit()
+    log_activity("deployment_review_requested", f"{cluster_name} queue review requested")
+    flash("Admin review requested. The deployment remains in the normal queue.", "success")
     return redirect(url_for("user_dashboard"))
 
 
@@ -2039,7 +2201,11 @@ def _launch_deployment_job(row):
 
 
 def _start_queued_deployments():
-    """Start as many FIFO jobs as current resource reservations allow."""
+    """Start the first FIFO job that is safe to admit.
+
+    A blocked head request holds the queue.  This keeps the user-visible
+    position meaningful and prevents later requests from overtaking it.
+    """
     queue_status = sql_statuses((QUEUED_STATUS,))
     with get_db_ctx() as conn:
         queued = conn.execute(
@@ -2048,19 +2214,22 @@ def _start_queued_deployments():
         ).fetchall()
 
     for row in queued:
-        # IPI deployments must be serialized (shared bootstrap + Ironic infrastructure)
+        # The current lab has one shared provisioning/Ironic plane.  A
+        # completed IPI cluster still occupies that capacity until its
+        # reservation is cleaned up, so later IPI requests remain queued.
         if row["install_type"] == "ipi":
-            ok, _ = _check_ipi_concurrency(row["id"])
+            ok, _ = _check_ipi_capacity(row["id"])
             if not ok:
-                continue
+                return
 
         ok, _ = _check_resources(row["install_type"])
         if not ok:
-            continue
+            return
         with get_db_ctx() as conn:
             claimed = claim_job(conn, row["id"], DEPLOYMENT_WORKER_ID)
         if claimed:
             _launch_deployment_job(claimed)
+            return
 
 
 def _deployment_scheduler():
