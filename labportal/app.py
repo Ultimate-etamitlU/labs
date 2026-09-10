@@ -1426,6 +1426,20 @@ def _check_resources(install_type):
     return True, "OK"
 
 
+def _check_ipi_concurrency(deployment_id):
+    """IPI deployments must be serialized (shared bootstrap + Ironic). Return False if another IPI is running."""
+    with get_db_ctx() as conn:
+        running_ipi = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM deployments "
+            f"WHERE install_type='ipi' AND status IN ({_RUNNING_DEPLOYMENT_SQL}) "
+            f"AND id != ?",
+            (deployment_id,)
+        ).fetchone()
+    if running_ipi["cnt"] > 0:
+        return False, "Another IPI deployment is in progress; IPI deploys must be serialized"
+    return True, "OK"
+
+
 @app.route("/user/dashboard")
 @login_required
 def user_dashboard():
@@ -2034,6 +2048,12 @@ def _start_queued_deployments():
         ).fetchall()
 
     for row in queued:
+        # IPI deployments must be serialized (shared bootstrap + Ironic infrastructure)
+        if row["install_type"] == "ipi":
+            ok, _ = _check_ipi_concurrency(row["id"])
+            if not ok:
+                continue
+
         ok, _ = _check_resources(row["install_type"])
         if not ok:
             continue
