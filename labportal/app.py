@@ -15,6 +15,7 @@ import select
 import shutil
 import signal
 import sqlite3
+import socket
 import struct
 import subprocess
 import sys
@@ -32,6 +33,17 @@ from flask import (
     flash, session, abort, jsonify, send_file
 )
 from flask_socketio import SocketIO, emit, disconnect
+
+from deployment_queue import (
+    ACTIVE_DEPLOYMENT_STATUSES,
+    DEPLOYING_STATUS,
+    QUEUED_STATUS,
+    RUNNING_DEPLOYMENT_STATUSES,
+    STARTING_STATUS,
+    claim_job,
+    running_statuses_sql,
+    sql_statuses,
+)
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -90,6 +102,17 @@ terminal_sessions = {}
 _terminal_lock = threading.RLock()
 TERMINAL_TIMEOUT = 3600       # 1 hour inactivity timeout (seconds)
 TERMINAL_WARN_BEFORE = 300    # warn 5 minutes before timeout
+
+# Deployment subprocesses started by this process.  The database remains the
+# source of truth so a portal restart can reconcile processes it did not spawn.
+_deployment_processes = {}
+_deployment_process_lock = threading.RLock()
+_deployment_scheduler_started = False
+DEPLOYMENT_QUEUE_INTERVAL_SECS = int(
+    os.environ.get("LABPORTAL_QUEUE_INTERVAL", "10")
+)
+DEPLOYMENT_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+DEPLOYMENT_EXIT_SUFFIX = ".exit"
 
 
 # --- Helpers ---
@@ -213,6 +236,9 @@ CLUSTER_IP_RANGES = {
     "sno2": ("192.168.200.20", "192.168.200.20"),
 }
 
+_ACTIVE_DEPLOYMENT_SQL = sql_statuses(ACTIVE_DEPLOYMENT_STATUSES)
+_RUNNING_DEPLOYMENT_SQL = running_statuses_sql()
+
 
 def get_dhcp_host_map():
     """Map VM names to IPs: local virsh DHCP for UPI/IPI, static config for SNO."""
@@ -260,7 +286,7 @@ def get_dhcp_host_map():
     try:
         with get_db_ctx() as conn:
             sno_deps = conn.execute(
-                "SELECT cluster_name FROM deployments WHERE install_type='sno' AND status IN ('deploying','completed')"
+                f"SELECT cluster_name FROM deployments WHERE install_type='sno' AND status IN ({_ACTIVE_DEPLOYMENT_SQL})"
             ).fetchall()
         for dep in sno_deps:
             slot = config.SNO_SLOTS.get(dep["cluster_name"])
@@ -277,7 +303,7 @@ def get_cluster_info(clusters):
     with get_db_ctx() as conn:
         rows = conn.execute(
             "SELECT cluster_name, started_by, description, install_type, finished_at, started_at "
-            "FROM deployments WHERE status IN ('deploying','completed')"
+            f"FROM deployments WHERE status IN ({_ACTIVE_DEPLOYMENT_SQL})"
         ).fetchall()
     info = {}
     for row in rows:
@@ -295,7 +321,9 @@ def get_cluster_reservations():
     with get_db_ctx() as conn:
         rows = conn.execute(
             "SELECT cluster_name, reserved_by, purpose, reserved_until FROM cluster_reservations "
-            "WHERE reserved_until >= datetime('now')"
+            "WHERE reserved_until >= datetime('now') "
+            "AND NOT EXISTS (SELECT 1 FROM deployments d "
+            "WHERE d.cluster_name=cluster_reservations.cluster_name AND d.status='queued')"
         ).fetchall()
     return {
         row["cluster_name"]: {
@@ -305,6 +333,19 @@ def get_cluster_reservations():
         }
         for row in rows
     }
+
+
+def get_deployment_queue():
+    """Return queued and active deployment jobs for the dashboard."""
+    statuses = sql_statuses((QUEUED_STATUS, STARTING_STATUS, DEPLOYING_STATUS, "stale"))
+    with get_db_ctx() as conn:
+        rows = conn.execute(
+            f"SELECT id, cluster_name, ocp_version, install_type, status, started_by, "
+            f"queued_at, started_at, claimed_at, failure_reason "
+            f"FROM deployments WHERE status IN ({statuses}) "
+            "ORDER BY COALESCE(queued_at, started_at), id"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _write_reservation_file():
@@ -320,7 +361,7 @@ def _write_reservation_file():
 def get_cluster_versions(clusters):
     with get_db_ctx() as conn:
         rows = conn.execute(
-            "SELECT cluster_name, ocp_version FROM deployments WHERE status IN ('deploying','completed')"
+            f"SELECT cluster_name, ocp_version FROM deployments WHERE status IN ({_ACTIVE_DEPLOYMENT_SQL})"
         ).fetchall()
     versions = {row["cluster_name"]: row["ocp_version"] for row in rows}
     # Fill in missing versions by scanning disk (most recently modified first)
@@ -647,6 +688,7 @@ def api_status():
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
     cluster_reservations = get_cluster_reservations()
+    deployment_queue = get_deployment_queue()
     with get_db_ctx() as conn:
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
@@ -655,6 +697,7 @@ def api_status():
     return jsonify(vms=vms, clusters=clusters_data, resources=resources,
                    cluster_versions=cluster_versions, cluster_info=cluster_info,
                    cluster_reservations=cluster_reservations,
+                   deployment_queue=deployment_queue,
                    total_deployments=total_deployments,
                    dhcp_map=dhcp_map, cluster_ranges=CLUSTER_IP_RANGES)
 
@@ -1049,7 +1092,7 @@ def admin_remove_machine(machine_id):
             return redirect(url_for("admin_panel"))
 
         active = conn.execute(
-            "SELECT COUNT(*) FROM deployments WHERE machine_id=? AND status IN ('deploying','completed')",
+            f"SELECT COUNT(*) FROM deployments WHERE machine_id=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL})",
             (machine_id,)
         ).fetchone()[0]
         if active > 0:
@@ -1331,22 +1374,55 @@ def change_password():
 
 
 
+def _resource_cost(install_type):
+    itype = config.INSTALL_TYPES.get(install_type, {})
+    return int(itype.get("vcpus", 0)), int(itype.get("ram_gb", 0))
+
+
+def _check_resource_capacity(install_type):
+    """Reject only requests that can never fit on this lab host."""
+    _, _, resources = get_lab_status()
+    cpus_total = int(resources.get("cpus", 0))
+    ram_total = int(resources.get("ram_total", 0))
+    required_cpus, required_ram = _resource_cost(install_type)
+
+    if required_cpus > cpus_total:
+        return False, f"Host has {cpus_total} CPUs, but this deployment needs {required_cpus}"
+    if required_ram > ram_total:
+        return False, f"Host has {ram_total}G RAM, but this deployment needs {required_ram}G"
+    return True, "OK"
+
+
 def _check_resources(install_type):
-    """Check if enough CPU and RAM are available for the given install type."""
+    """Check current capacity, including resources reserved by active jobs."""
     _, _, resources = get_lab_status()
     cpus_total = int(resources.get("cpus", 0))
     cpus_used = int(resources.get("cpus_used", 0))
     ram_total = int(resources.get("ram_total", 0))
     ram_used = int(resources.get("ram_used", 0))
 
-    itype = config.INSTALL_TYPES.get(install_type, {})
+    required_cpus, required_ram = _resource_cost(install_type)
+    reserved_cpus = 0
+    reserved_ram = 0
+    with get_db_ctx() as conn:
+        active_jobs = conn.execute(
+            f"SELECT install_type, resource_vcpus, resource_ram_gb "
+            f"FROM deployments WHERE status IN ({_RUNNING_DEPLOYMENT_SQL})"
+        ).fetchall()
+    for job in active_jobs:
+        fallback_cpus, fallback_ram = _resource_cost(job["install_type"])
+        reserved_cpus += int(job["resource_vcpus"] or fallback_cpus)
+        reserved_ram += int(job["resource_ram_gb"] or fallback_ram)
+
     cpus_free = cpus_total - cpus_used
     ram_free = ram_total - ram_used
 
-    if cpus_free < itype.get("vcpus", 0):
-        return False, f"Not enough CPUs: {cpus_free} free, need {itype['vcpus']}"
-    if ram_free < itype.get("ram_gb", 0):
-        return False, f"Not enough RAM: {ram_free}G free, need {itype['ram_gb']}G"
+    if cpus_free - reserved_cpus < required_cpus:
+        return False, (f"Not enough CPUs: {cpus_free} free, {reserved_cpus} reserved "
+                       f"by active deployments, need {required_cpus}")
+    if ram_free - reserved_ram < required_ram:
+        return False, (f"Not enough RAM: {ram_free}G free, {reserved_ram}G reserved "
+                       f"by active deployments, need {required_ram}G")
     return True, "OK"
 
 
@@ -1355,14 +1431,19 @@ def _check_resources(install_type):
 def user_dashboard():
     vms, clusters, resources = get_lab_status()
     slots = config.cluster_slots()
-    available_slots = sorted(name for name in slots if name not in clusters)
+    cluster_reservations = get_cluster_reservations()
+    deployment_queue = get_deployment_queue()
+    reserved_names = (set(cluster_reservations) |
+                      {job["cluster_name"] for job in deployment_queue})
+    available_slots = sorted(name for name in slots
+                             if name not in clusters and name not in reserved_names)
     ipi_slots = config.ipi_slots()
-    available_ipi_slots = sorted(name for name in ipi_slots if name not in clusters)
+    available_ipi_slots = sorted(name for name in ipi_slots
+                                 if name not in clusters and name not in reserved_names)
     ssh_user = derive_linux_username(session.get("user_email", ""))
     domain = config.base_domain()
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
-    cluster_reservations = get_cluster_reservations()
     with get_db_ctx() as conn:
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
@@ -1387,6 +1468,7 @@ def user_dashboard():
                            cluster_versions=cluster_versions,
                            cluster_info=cluster_info,
                            cluster_reservations=cluster_reservations,
+                           deployment_queue=deployment_queue,
                            total_deployments=total_deployments,
                            lab_machines=lab_machines_list,
                            available_ipi_slots=available_ipi_slots,
@@ -1408,7 +1490,7 @@ def cluster_kubeconfig(cluster_name):
     # Try DB first for the exact path
     with get_db_ctx() as conn:
         dep = conn.execute(
-            "SELECT cluster_name, ocp_version FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            f"SELECT cluster_name, ocp_version FROM deployments WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) LIMIT 1",
             (cluster_name,)
         ).fetchone()
     if dep:
@@ -1429,7 +1511,6 @@ def cluster_create():
     cluster_name = request.form.get("cluster_name", "").strip()
     ocp_version = request.form.get("ocp_version", "").strip()
     install_type = request.form.get("install_type", "upi").strip()
-    network_type = "OVNKubernetes"
     description = request.form.get("description", "").strip()[:80]
     reservation_hours_raw = request.form.get("reservation_hours", "").strip()
 
@@ -1458,7 +1539,7 @@ def cluster_create():
         return redirect(url_for("user_dashboard"))
 
     itype = config.INSTALL_TYPES[install_type]
-    vms, clusters, _ = get_lab_status()
+    _, clusters, _ = get_lab_status()
 
     machine_id = None
     install_method = None
@@ -1512,17 +1593,12 @@ def cluster_create():
         flash(f"Cluster '{cluster_name}' already exists.", "warning")
         return redirect(url_for("user_dashboard"))
 
-    # Check if another cluster's bootstrap is still running
-    for vm in vms:
-        if "bootstrap" in vm["name"] and vm["state"] == "running":
-            flash(f"Another deployment is in progress ({vm['name']} is still running). "
-                  "Please wait for it to finish before deploying a new cluster.", "warning")
-            return redirect(url_for("user_dashboard"))
-
-    # Resource check
-    ok, msg = _check_resources(install_type)
+    # Only reject deployments that can never fit on the host.  Current free
+    # capacity is handled by the scheduler, so another running deployment
+    # causes this request to wait in the durable queue instead of being lost.
+    ok, msg = _check_resource_capacity(install_type)
     if not ok:
-        flash(f"Cannot deploy {itype['label']}: {msg}", "danger")
+        flash(f"Cannot queue {itype['label']}: {msg}", "danger")
         return redirect(url_for("user_dashboard"))
 
     # Validate OCP version exists on the mirror
@@ -1539,32 +1615,39 @@ def cluster_create():
     except Exception:
         pass  # Network issue — let the deploy script handle it
 
-    # Select deploy script for this install type
-    deploy_script = itype["script"]
-
-    # Atomically claim the slot — prevents TOCTOU race when two users
-    # deploy the same cluster name concurrently.  The INSERT succeeds only
-    # if no active deployment exists for this cluster_name.
+    # Reserve the cluster name/IP slot and enqueue the request atomically.
+    # The scheduler will claim the row and start the subprocess when resources
+    # are available.  Failed rows are retained for audit instead of deleted.
     log_file = f"/tmp/deploy-{cluster_name}-{ocp_version}.log"
     user_email = session.get("user_email")
+    resource_vcpus, resource_ram_gb = _resource_cost(install_type)
     try:
         with get_db_ctx() as conn:
-            cur = conn.execute(
-                "INSERT INTO deployments (cluster_name, ocp_version, status, started_by, pid, log_file, ip_offset, install_type, description) "
-                "SELECT ?, ?, 'deploying', ?, NULL, ?, ?, ?, ? "
-                "WHERE NOT EXISTS (SELECT 1 FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed')) "
-                "AND NOT EXISTS (SELECT 1 FROM deployments WHERE ip_offset=? AND status IN ('deploying','completed'))",
-                (cluster_name, ocp_version, user_email, log_file, ip_offset, install_type, description, cluster_name, ip_offset)
-            )
-            if cur.rowcount == 0:
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute(
+                f"SELECT 1 FROM deployments WHERE "
+                f"(cluster_name=? OR ip_offset=?) AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) LIMIT 1",
+                (cluster_name, ip_offset)
+            ).fetchone()
+            if duplicate:
                 conn.rollback()
-                flash(f"Cluster '{cluster_name}' is already being deployed.", "warning")
+                flash(f"Cluster '{cluster_name}' is already reserved or deployed.", "warning")
                 return redirect(url_for("user_dashboard"))
+            conn.execute(
+                "INSERT INTO deployments ("
+                "cluster_name, ocp_version, status, started_by, started_at, pid, log_file, "
+                "ip_offset, install_type, description, machine_id, install_method, "
+                "reservation_hours, resource_vcpus, resource_ram_gb, queued_at"
+                ") VALUES (?, ?, 'queued', ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (cluster_name, ocp_version, user_email, log_file, ip_offset, install_type,
+                 description, machine_id, install_method or "", reservation_hours,
+                 resource_vcpus, resource_ram_gb)
+            )
             conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
             conn.execute(
                 "INSERT INTO cluster_reservations (cluster_name, reserved_by, purpose, reserved_until) "
-                "VALUES (?, ?, ?, datetime('now', '+' || ? || ' hours'))",
-                (cluster_name, user_email, description, str(reservation_hours))
+                "VALUES (?, ?, ?, datetime('9999-12-31'))",
+                (cluster_name, user_email, description)
             )
             if needs_extension:
                 conn.execute(
@@ -1573,65 +1656,411 @@ def cluster_create():
                     (cluster_name, user_email, description)
                 )
             conn.commit()
-
-        # Store machine_id for SNO deployments
-        if machine_id:
-            with get_db_ctx() as conn:
-                conn.execute("UPDATE deployments SET machine_id=? WHERE cluster_name=? AND status='deploying'",
-                             (machine_id, cluster_name))
-                conn.commit()
-
-        # Slot claimed — now start the subprocess
-        env = os.environ.copy()
-        env["BASE_DOMAIN"] = config.base_domain()
-
-        if install_type == "sno":
-            deploy_args = [deploy_script, ocp_version, cluster_name, machine["hostname"], install_method]
-            env["SSH_USER"] = machine["ssh_user"]
-            env["SSH_PORT"] = str(machine["ssh_port"])
-            if machine.get("ssh_pubkey"):
-                env["PEER_SSH_PUBKEY"] = machine["ssh_pubkey"]
-        else:
-            deploy_args = [deploy_script, ocp_version, cluster_name, str(ip_offset), network_type]
-
-        with open(log_file, "w") as log_fd:
-            proc = subprocess.Popen(
-                deploy_args,
-                stdout=log_fd,
-                stderr=subprocess.STDOUT,
-                cwd="/root",
-                start_new_session=True,
-                env=env
-            )
-        with get_db_ctx() as conn:
-            conn.execute("UPDATE deployments SET pid=? WHERE cluster_name=? AND status='deploying'",
-                         (proc.pid, cluster_name))
-            conn.commit()
-        log_activity("cluster_deploy", f"{cluster_name} {install_type.upper()} OCP {ocp_version} life {reservation_hours}h")
+        log_activity("cluster_queued", f"{cluster_name} {install_type.upper()} OCP {ocp_version} life {reservation_hours}h")
         _write_reservation_file()
         life_msg = f"reserved for {reservation_hours}h"
         if needs_extension:
             life_msg += " (extension request sent to admin)"
-        flash(f"Cluster '{cluster_name}' ({itype['label']}) deployment started (OCP {ocp_version}), {life_msg}.", "success")
+        flash(f"Cluster '{cluster_name}' ({itype['label']}) was queued (OCP {ocp_version}), {life_msg}.", "success")
     except Exception as e:
-        # Deploy kickoff failed after the slot was claimed — release the
-        # reservation and drop the stuck 'deploying' row so the slot frees up.
-        app.logger.error("Deploy kickoff failed for %s: %s", cluster_name, e)
-        try:
-            with get_db_ctx() as conn:
-                conn.execute(
-                    "DELETE FROM deployments WHERE cluster_name=? AND status='deploying'",
-                    (cluster_name,))
-                conn.execute(
-                    "DELETE FROM cluster_reservations WHERE cluster_name=?",
-                    (cluster_name,))
-                conn.commit()
-            _write_reservation_file()
-        except Exception as cleanup_err:
-            app.logger.error("Slot cleanup after failed deploy of %s: %s", cluster_name, cleanup_err)
-        flash("Failed to start deployment. The slot has been released; please try again.", "danger")
+        app.logger.error("Failed to queue deployment for %s: %s", cluster_name, e)
+        flash("Failed to queue deployment. Please try again.", "danger")
 
     return redirect(url_for("user_dashboard"))
+
+
+def _record_system_activity(event, details):
+    """Record a background-worker event without requiring a Flask request."""
+    with get_db_ctx() as conn:
+        conn.execute(
+            "INSERT INTO activity_log (event, user_email, ip_address, details) "
+            "VALUES (?, ?, ?, ?)",
+            (event, "system", "127.0.0.1", details),
+        )
+        conn.commit()
+
+
+def _deployment_has_live_state(cluster_name, clusters=None):
+    """Return whether VMs or install artifacts still exist for a deployment."""
+    if clusters is None:
+        _, clusters, _ = get_lab_status()
+    if cluster_name in clusters and clusters[cluster_name]:
+        return True
+    try:
+        return bool(glob.glob(
+            f"{config.storage_dir()}/clusters/{cluster_name}-*"
+        ))
+    except (OSError, TypeError):
+        return False
+
+
+def _deployment_process_alive(row):
+    """Check a recorded process/group without sending it a signal."""
+    process_group = row["process_group"]
+    pid = row["pid"]
+    try:
+        if process_group:
+            os.killpg(int(process_group), 0)
+            return True
+        if not pid:
+            return False
+        os.kill(int(pid), 0)
+    except (OSError, ProcessLookupError, TypeError, ValueError):
+        return False
+
+    # Old rows only have a PID.  Avoid treating an unrelated reused PID as a
+    # live installer when the proc command line is available.
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as cmdline:
+            command = cmdline.read().replace(b"\0", b" ").decode(errors="replace")
+        if command and row["cluster_name"] not in command and "ocp-" not in command:
+            return False
+    except (OSError, ValueError):
+        pass
+    return True
+
+
+def _deployment_exit_code(row):
+    """Read the installer exit code recorded by the deployment wrapper."""
+    log_file = row["log_file"]
+    if not log_file:
+        return None
+    exit_file = f"{log_file}{DEPLOYMENT_EXIT_SUFFIX}"
+    try:
+        with open(exit_file, "r") as status_fd:
+            value = status_fd.read().strip()
+        if not value:
+            return None
+        return int(value)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _update_deployment_heartbeat(deployment_id):
+    with get_db_ctx() as conn:
+        conn.execute(
+            "UPDATE deployments SET heartbeat_at=CURRENT_TIMESTAMP, "
+            "last_reconciled_at=CURRENT_TIMESTAMP WHERE id=?",
+            (deployment_id,),
+        )
+        conn.commit()
+
+
+def _mark_deployment_finished(deployment_id, status, reason="", exit_code=None,
+                              preserve_reservation=False):
+    """Complete a job while retaining its deployment row for audit."""
+    with get_db_ctx() as conn:
+        row = conn.execute(
+            "SELECT cluster_name FROM deployments WHERE id=?", (deployment_id,)
+        ).fetchone()
+        if not row:
+            return
+        conn.execute(
+            "UPDATE deployments SET status=?, finished_at=CURRENT_TIMESTAMP, "
+            "failure_reason=?, exit_code=?, heartbeat_at=CURRENT_TIMESTAMP, "
+            "last_reconciled_at=CURRENT_TIMESTAMP WHERE id=?",
+            (status, reason, exit_code, deployment_id),
+        )
+        if not preserve_reservation:
+            conn.execute(
+                "DELETE FROM cluster_reservations WHERE cluster_name=?",
+                (row["cluster_name"],),
+            )
+        conn.commit()
+    _write_reservation_file()
+
+
+def _finalize_deployment_process(deployment_id, return_code, clusters=None):
+    with get_db_ctx() as conn:
+        row = conn.execute(
+            "SELECT * FROM deployments WHERE id=?", (deployment_id,)
+        ).fetchone()
+    if not row or row["status"] not in RUNNING_DEPLOYMENT_STATUSES:
+        return
+
+    has_state = _deployment_has_live_state(row["cluster_name"], clusters)
+    if return_code == 0:
+        _mark_deployment_finished(deployment_id, "completed", exit_code=0,
+                                  preserve_reservation=True)
+        _record_system_activity(
+            "cluster_deploy_complete",
+            f"{row['cluster_name']} deployment process completed successfully",
+        )
+    elif has_state:
+        _mark_deployment_finished(
+            deployment_id,
+            "stale",
+            reason=(f"Installer exited with code {return_code}; VM or install "
+                    "artifacts remain and require manual reconciliation"),
+            exit_code=return_code,
+            preserve_reservation=True,
+        )
+        _record_system_activity(
+            "cluster_deploy_stale",
+            f"{row['cluster_name']} installer exited with code {return_code}; state preserved",
+        )
+    else:
+        _mark_deployment_finished(
+            deployment_id,
+            "failed",
+            reason=f"Installer exited with code {return_code}",
+            exit_code=return_code,
+        )
+        _record_system_activity(
+            "cluster_deploy_failed",
+            f"{row['cluster_name']} installer exited with code {return_code}",
+        )
+
+
+def _poll_deployment_processes(clusters=None):
+    with _deployment_process_lock:
+        processes = list(_deployment_processes.items())
+    for deployment_id, proc in processes:
+        try:
+            poll_result = proc.poll()
+        except (ChildProcessError, OSError):
+            poll_result = 1
+        if poll_result is None:
+            continue
+        with get_db_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM deployments WHERE id=?", (deployment_id,)
+            ).fetchone()
+        if not row:
+            with _deployment_process_lock:
+                _deployment_processes.pop(deployment_id, None)
+            continue
+        # SIGCHLD is intentionally ignored by the terminal subsystem.  In
+        # that mode Python cannot recover the real wait status, so use the
+        # wrapper's sidecar and fail closed if it is unavailable.
+        return_code = _deployment_exit_code(row)
+        if return_code is None:
+            return_code = 1
+        _finalize_deployment_process(deployment_id, return_code, clusters)
+        with _deployment_process_lock:
+            _deployment_processes.pop(deployment_id, None)
+
+
+def _reconcile_orphan_reservations(clusters):
+    """Release failed-job reservations without deleting deployment history."""
+    with get_db_ctx() as conn:
+        rows = conn.execute(
+            "SELECT r.cluster_name, d.id, d.status "
+            "FROM cluster_reservations r "
+            "LEFT JOIN deployments d ON d.id=("
+            "SELECT MAX(id) FROM deployments WHERE cluster_name=r.cluster_name)"
+        ).fetchall()
+    for row in rows:
+        if row["cluster_name"] in clusters:
+            continue
+        if row["status"] not in ("failed", "cancelled"):
+            continue
+        if _deployment_has_live_state(row["cluster_name"], clusters):
+            continue
+        with get_db_ctx() as conn:
+            conn.execute(
+                "DELETE FROM cluster_reservations WHERE cluster_name=?",
+                (row["cluster_name"],),
+            )
+            conn.commit()
+        _record_system_activity(
+            "reservation_reconciled",
+            f"released reservation for {row['cluster_name']} after {row['status']} deployment",
+        )
+    _write_reservation_file()
+
+
+def _reconcile_deployments():
+    """Reconcile DB state with processes/VMs without destroying anything."""
+    _, clusters, _ = get_lab_status()
+    with get_db_ctx() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM deployments WHERE status IN ({_RUNNING_DEPLOYMENT_SQL})"
+        ).fetchall()
+
+    for row in rows:
+        if _deployment_process_alive(row):
+            _update_deployment_heartbeat(row["id"])
+            continue
+        recorded_exit_code = _deployment_exit_code(row)
+        if recorded_exit_code is not None:
+            _finalize_deployment_process(row["id"], recorded_exit_code, clusters)
+            continue
+        if _deployment_has_live_state(row["cluster_name"], clusters):
+            _mark_deployment_finished(
+                row["id"],
+                "stale",
+                reason=("Installer process is no longer present; VM or install "
+                        "artifacts remain and require manual reconciliation"),
+                preserve_reservation=True,
+            )
+            _record_system_activity(
+                "cluster_deploy_stale",
+                f"{row['cluster_name']} process disappeared; state preserved",
+            )
+        else:
+            _mark_deployment_finished(
+                row["id"],
+                "failed",
+                reason="Installer process is no longer present and no state was found",
+            )
+            _record_system_activity(
+                "cluster_deploy_failed",
+                f"{row['cluster_name']} process disappeared without cluster state",
+            )
+
+    _reconcile_orphan_reservations(clusters)
+
+
+def _launch_deployment_job(row):
+    """Start a claimed queue row and persist its process identity."""
+    install_type = row["install_type"]
+    itype = config.INSTALL_TYPES.get(install_type)
+    if not itype:
+        _mark_deployment_finished(
+            row["id"], "failed", "Unknown install type in queued deployment"
+        )
+        return
+
+    deploy_script = itype["script"]
+    env = os.environ.copy()
+    env["BASE_DOMAIN"] = config.base_domain()
+    if install_type == "sno":
+        with get_db_ctx() as conn:
+            machine = conn.execute(
+                "SELECT hostname, ssh_user, ssh_port, status FROM lab_machines WHERE id=?",
+                (row["machine_id"],),
+            ).fetchone()
+        if not machine or machine["status"] != "ready":
+            _mark_deployment_finished(
+                row["id"], "failed", "SNO target machine is no longer ready"
+            )
+            return
+        deploy_args = [
+            deploy_script,
+            row["ocp_version"],
+            row["cluster_name"],
+            machine["hostname"],
+            row["install_method"] or "agent-none",
+        ]
+        env["SSH_USER"] = machine["ssh_user"]
+        env["SSH_PORT"] = str(machine["ssh_port"])
+    else:
+        deploy_args = [
+            deploy_script,
+            row["ocp_version"],
+            row["cluster_name"],
+            str(row["ip_offset"]),
+            "OVNKubernetes",
+        ]
+
+    log_file = row["log_file"] or (
+        f"/tmp/deploy-{row['cluster_name']}-{row['ocp_version']}.log"
+    )
+    exit_file = f"{log_file}{DEPLOYMENT_EXIT_SUFFIX}"
+    try:
+        os.remove(exit_file)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _mark_deployment_finished(
+            row["id"], "failed", f"Unable to prepare installer status file: {exc}"
+        )
+        return
+    env["LABPORTAL_EXIT_CODE_FILE"] = exit_file
+    wrapper = (
+        "set +e\n"
+        '"$@"\n'
+        "rc=$?\n"
+        'printf "%s\\n" "$rc" > "$LABPORTAL_EXIT_CODE_FILE"\n'
+        'exit "$rc"\n'
+    )
+    proc = None
+    try:
+        with open(log_file, "w") as log_fd:
+            proc = subprocess.Popen(
+                ["/bin/bash", "-c", wrapper, "deployment-wrapper", *deploy_args],
+                stdout=log_fd,
+                stderr=subprocess.STDOUT,
+                cwd="/root",
+                start_new_session=True,
+                env=env,
+            )
+        process_group = os.getpgid(proc.pid)
+        with get_db_ctx() as conn:
+            conn.execute(
+                "UPDATE deployments SET status=?, started_at=CURRENT_TIMESTAMP, "
+                "pid=?, process_group=?, log_file=?, heartbeat_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status=?",
+                (DEPLOYING_STATUS, proc.pid, process_group, log_file,
+                 row["id"], STARTING_STATUS),
+            )
+            conn.execute(
+                "UPDATE cluster_reservations SET reserved_until="
+                "datetime('now', '+' || ? || ' hours') WHERE cluster_name=?",
+                (str(row["reservation_hours"] or 8), row["cluster_name"]),
+            )
+            conn.commit()
+        with _deployment_process_lock:
+            _deployment_processes[row["id"]] = proc
+        _record_system_activity(
+            "cluster_deploy",
+            f"{row['cluster_name']} {install_type.upper()} OCP {row['ocp_version']} "
+            f"life {row['reservation_hours']}h",
+        )
+        _write_reservation_file()
+    except Exception as exc:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+        _mark_deployment_finished(
+            row["id"], "failed", f"Unable to start installer: {exc}"
+        )
+        _record_system_activity(
+            "cluster_deploy_failed",
+            f"{row['cluster_name']} could not start: {exc}",
+        )
+
+
+def _start_queued_deployments():
+    """Start as many FIFO jobs as current resource reservations allow."""
+    queue_status = sql_statuses((QUEUED_STATUS,))
+    with get_db_ctx() as conn:
+        queued = conn.execute(
+            f"SELECT * FROM deployments WHERE status IN ({queue_status}) "
+            "ORDER BY queued_at, id"
+        ).fetchall()
+
+    for row in queued:
+        ok, _ = _check_resources(row["install_type"])
+        if not ok:
+            continue
+        with get_db_ctx() as conn:
+            claimed = claim_job(conn, row["id"], DEPLOYMENT_WORKER_ID)
+        if claimed:
+            _launch_deployment_job(claimed)
+
+
+def _deployment_scheduler():
+    while True:
+        try:
+            _poll_deployment_processes()
+            _reconcile_deployments()
+            _start_queued_deployments()
+        except Exception:
+            app.logger.exception("deployment scheduler error")
+        time.sleep(DEPLOYMENT_QUEUE_INTERVAL_SECS)
+
+
+def _start_deployment_scheduler():
+    global _deployment_scheduler_started
+    if _deployment_scheduler_started:
+        return
+    _deployment_scheduler_started = True
+    threading.Thread(target=_deployment_scheduler,
+                     name="deployment-scheduler", daemon=True).start()
 
 
 def _destroy_ipi_bootstrap(infra_id, errors=None):
@@ -1674,7 +2103,9 @@ def _delete_cluster_internal(cluster_name, cluster_vms):
     """Delete a cluster's VMs, storage, and DB records. Returns list of errors."""
     with get_db_ctx() as conn:
         dep = conn.execute(
-            "SELECT install_type, ip_offset, machine_id FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            f"SELECT install_type, ip_offset, machine_id FROM deployments "
+            f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+            "ORDER BY id DESC LIMIT 1",
             (cluster_name,)
         ).fetchone()
     dep_install_type = dep["install_type"] if dep and dep["install_type"] else "upi"
@@ -1852,9 +2283,31 @@ def cluster_delete():
     # For SNO (remote) clusters, check DB since they won't appear in local virsh
     with get_db_ctx() as conn:
         dep_check = conn.execute(
-            "SELECT started_by, install_type FROM deployments WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+            f"SELECT started_by, install_type, status FROM deployments "
+            f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+            "ORDER BY id DESC LIMIT 1",
             (cluster_name,)
         ).fetchone()
+
+    # Queued jobs have not created any VMs, so cancellation only releases the
+    # reservation and retains the deployment row as an audit record.
+    if dep_check and dep_check["status"] == QUEUED_STATUS and cluster_name not in clusters:
+        if not session.get("admin") and dep_check["started_by"] != session.get("user_email"):
+            flash("You can only cancel deployments you created.", "danger")
+            return redirect(url_for("user_dashboard"))
+        with get_db_ctx() as conn:
+            conn.execute(
+                "UPDATE deployments SET status='cancelled', finished_at=CURRENT_TIMESTAMP, "
+                "failure_reason='Cancelled before installer start', "
+                "last_reconciled_at=CURRENT_TIMESTAMP WHERE cluster_name=? AND status=?",
+                (cluster_name, QUEUED_STATUS),
+            )
+            conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
+            conn.commit()
+        _record_system_activity("cluster_deploy_cancelled", f"{cluster_name} cancelled while queued")
+        _write_reservation_file()
+        flash(f"Queued deployment '{cluster_name}' cancelled.", "success")
+        return redirect(url_for("user_dashboard"))
 
     is_remote = dep_check and dep_check["install_type"] == "sno"
     if cluster_name not in clusters and not is_remote:
@@ -1991,7 +2444,7 @@ def terminal_connect(auth=None):
         with get_db_ctx() as conn:
             dep = conn.execute(
                 "SELECT machine_id FROM deployments "
-                "WHERE cluster_name=? AND status IN ('deploying','completed') LIMIT 1",
+                f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) LIMIT 1",
                 (cluster,)
             ).fetchone()
             if dep and dep["machine_id"]:
@@ -2107,7 +2560,7 @@ def _terminal_reaper():
 
 
 def _cluster_lifetime_reaper():
-    """Periodically check for expired cluster reservations and auto-delete those clusters."""
+    """Expire selected cluster lifetimes while preserving DB audit history."""
     while True:
         time.sleep(300)
         try:
@@ -2130,9 +2583,26 @@ def _cluster_lifetime_reaper():
                         conn2.commit()
                 else:
                     with get_db_ctx() as conn:
+                        pending = conn.execute(
+                            f"SELECT id, status FROM deployments WHERE cluster_name=? "
+                            f"AND status IN ({_RUNNING_DEPLOYMENT_SQL}) "
+                            "ORDER BY id DESC LIMIT 1",
+                            (name,),
+                        ).fetchone()
+                        if pending:
+                            conn.execute(
+                                "UPDATE deployments SET status='failed', "
+                                "finished_at=CURRENT_TIMESTAMP, "
+                                "failure_reason='Reservation expired before installer state was found', "
+                                "last_reconciled_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (pending["id"],),
+                            )
                         conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (name,))
-                        conn.execute("DELETE FROM deployments WHERE cluster_name=?", (name,))
                         conn.commit()
+                    _record_system_activity(
+                        "reservation_expired",
+                        f"{name} reservation expired; deployment history retained",
+                    )
         except Exception as e:
             app.logger.error("lifetime_reaper error: %s", e)
 
@@ -2147,12 +2617,14 @@ def _orphan_bootstrap_reaper():
     while True:
         time.sleep(600)  # check every 10 minutes
         try:
-            # Check if any cluster is actively deploying — bootstrap is expected during install
+            # Protect bootstrap VMs belonging to active or stale jobs.  A stale
+            # job is intentionally left for manual reconciliation, not reaped.
             with get_db_ctx() as conn:
-                deploying = conn.execute(
-                    "SELECT cluster_name FROM deployments WHERE status='deploying'"
+                protected = conn.execute(
+                    f"SELECT cluster_name FROM deployments WHERE status IN "
+                    f"({sql_statuses((STARTING_STATUS, DEPLOYING_STATUS, 'stale'))})"
                 ).fetchall()
-            deploying_names = {row["cluster_name"] for row in deploying}
+            protected_names = {row["cluster_name"] for row in protected}
 
             result = subprocess.run(["virsh", "list", "--name"],
                                     capture_output=True, text=True, timeout=10)
@@ -2160,8 +2632,9 @@ def _orphan_bootstrap_reaper():
                 vm_name = vm_name.strip()
                 if not vm_name or "-bootstrap" not in vm_name:
                     continue
-                # Skip if a deployment is in progress — bootstrap is expected
-                if deploying_names:
+                # Skip a bootstrap tied to a deployment that is still running
+                # or needs manual reconciliation.
+                if any(name in vm_name for name in protected_names):
                     continue
                 # Check how long this VM has been running (process uptime)
                 try:
@@ -2230,7 +2703,7 @@ def _deploy_watchdog():
             with get_db_ctx() as conn:
                 stuck = conn.execute(
                     "SELECT cluster_name, pid FROM deployments "
-                    "WHERE status='deploying' "
+                    f"WHERE status IN ({_RUNNING_DEPLOYMENT_SQL}) "
                     "AND started_at < datetime('now', '-' || ? || ' seconds')",
                     (str(DEPLOY_MAX_AGE_SECS),)
                 ).fetchall()
@@ -2304,6 +2777,7 @@ if __name__ == "__main__":
         cli_set_password()
     else:
         init_db()
+        _start_deployment_scheduler()
         _start_remote_poller()
         if not config.is_setup_complete():
             print("First-run setup not completed. Visit /labs/setup in the browser.")
