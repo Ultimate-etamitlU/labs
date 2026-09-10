@@ -2,6 +2,7 @@ import sqlite3
 import os
 from contextlib import contextmanager
 from config import DB_PATH
+from deployment_queue import ensure_schema as ensure_deployment_queue_schema
 
 
 # Each caller gets its own connection — no cross-thread sharing,
@@ -173,6 +174,8 @@ def init_db():
         conn.execute("SELECT ssh_pubkey FROM lab_machines LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE lab_machines ADD COLUMN ssh_pubkey TEXT DEFAULT ''")
+
+    ensure_deployment_queue_schema(conn)
 
     boss = conn.execute("SELECT id FROM lab_machines WHERE role='boss'").fetchone()
     if not boss:

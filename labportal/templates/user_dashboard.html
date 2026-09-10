@@ -206,6 +206,40 @@
     </div>
 </div>
 
+<!-- Deployment Queue -->
+<div class="dash-card" id="deployment-queue-card" {% if not deployment_queue %}style="display:none"{% endif %}>
+    <div class="dash-card-header">
+        <h2>Deployment Queue</h2>
+    </div>
+    <div id="deployment-queue-container">
+        {% for job in deployment_queue %}
+        <div class="cluster-group" style="padding:0.75rem 1rem; margin-bottom:0.5rem;">
+            <div class="cluster-header">
+                <span class="cluster-dot"></span>
+                <span class="cluster-name">{{ job.cluster_name }}</span>
+                <span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">
+                    {{ job.status|capitalize }}
+                </span>
+                <span class="cluster-badge" style="background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;">
+                    {{ job.install_type|upper }} / OCP {{ job.ocp_version }}
+                </span>
+                {% if job.status == 'queued' and (session.get('admin') or job.started_by == session.get('user_email')) %}
+                <div class="cluster-actions">
+                    <form method="post" action="{{ url_for('cluster_delete') }}"
+                          onsubmit="return confirm('Cancel queued deployment {{ job.cluster_name }}?');">
+                        <input type="hidden" name="cluster_name" value="{{ job.cluster_name }}">
+                        <button type="submit" class="pf-v5-c-button pf-m-danger pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">
+                            Cancel Queue
+                        </button>
+                    </form>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
 <!-- Active Clusters -->
 <div class="dash-card" id="clusters-card">
     <div class="dash-card-header">
@@ -516,6 +550,21 @@ document.addEventListener('keydown', function(e) {
                             '<div class="resource-tile"><div class="resource-big-num">' + data.vms.length + '</div><span class="resource-label">VMs</span><span class="resource-sub">' + running + ' running</span></div>' +
                             '<div class="resource-tile"><div class="resource-big-num">' + (data.total_deployments || 0) + '</div><span class="resource-label">Deployed</span><span class="resource-sub">clusters to date</span></div>';
                     }
+                }
+
+                // Rebuild deployment queue
+                const queueCard = document.getElementById('deployment-queue-card');
+                const queueContainer = document.getElementById('deployment-queue-container');
+                const queue = data.deployment_queue || [];
+                if (queueCard && queueContainer) {
+                    queueCard.style.display = queue.length ? '' : 'none';
+                    queueContainer.innerHTML = queue.map(function(job) {
+                        const canCancel = job.status === 'queued' && (IS_ADMIN || job.started_by === CURRENT_USER);
+                        const cancel = canCancel
+                            ? '<div class="cluster-actions"><form method="post" action="/labs/cluster/delete" onsubmit="return confirm(\'Cancel queued deployment ' + job.cluster_name + '?\');"><input type="hidden" name="cluster_name" value="' + job.cluster_name + '"><button type="submit" class="pf-v5-c-button pf-m-danger pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">Cancel Queue</button></form></div>'
+                            : '';
+                        return '<div class="cluster-group" style="padding:0.75rem 1rem;margin-bottom:0.5rem;"><div class="cluster-header"><span class="cluster-dot"></span><span class="cluster-name">' + job.cluster_name + '</span><span class="cluster-badge" style="background:#292c30;color:#c7c7c7;border:1px solid #3c3f42;">' + job.status.charAt(0).toUpperCase() + job.status.slice(1) + '</span><span class="cluster-badge" style="background:#1f6bff22;color:#73bcf7;border-color:#1f6bff55;">' + job.install_type.toUpperCase() + ' / OCP ' + job.ocp_version + '</span>' + cancel + '</div></div>';
+                    }).join('');
                 }
 
                 // Rebuild clusters
