@@ -590,6 +590,14 @@ fi
 
 openshift-install create cluster --dir=. --log-level=info
 
+# Fix qcow2 disk image ownership created by Ironic during provisioning.
+# Ironic creates disks as root:root, but libvirt needs qemu:qemu access.
+echo ""
+echo "=== Fixing disk ownership (created by Ironic) ==="
+for disk in "$STORAGE_DIR/kvm_images/${VM_PREFIX}-*.qcow2"; do
+    [ -f "$disk" ] && chown qemu:qemu "$disk" && chmod 600 "$disk" && echo "Fixed: $disk"
+done
+
 # --- 7. POST-INSTALL ---
 export KUBECONFIG="$INSTALL_DIR/auth/kubeconfig"
 
