@@ -172,7 +172,9 @@ def validate_email(email):
 # Allowlist patterns applied at request boundaries before any value reaches a
 # subprocess, file path, or shell string. Reject-by-default.
 _RE_CLUSTER_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
-_RE_OCP_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+_RE_OCP_VERSION = re.compile(
+    r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+)
 
 
 def valid_cluster_name(name):
@@ -326,11 +328,58 @@ def get_cluster_info(clusters):
     return info
 
 
+def _console_activation_marker(cluster_name):
+    return os.path.join(config.CONSOLE_ACTIVATION_DIR, f"{cluster_name}.enabled")
+
+
+def _set_console_activation_marker(cluster_name, enabled):
+    """Make the Apache-side console gate match the persisted DB state."""
+    marker = _console_activation_marker(cluster_name)
+    try:
+        os.makedirs(config.CONSOLE_ACTIVATION_DIR, mode=0o755, exist_ok=True)
+        if enabled:
+            with open(marker, "a", encoding="utf-8"):
+                pass
+            os.chmod(marker, 0o644)
+        else:
+            try:
+                os.unlink(marker)
+            except FileNotFoundError:
+                pass
+        return True
+    except OSError as exc:
+        app.logger.error("Unable to update console activation for %s: %s", cluster_name, exc)
+        return False
+
+
+def _sync_console_activation_markers():
+    """Restore active console gates after a portal restart and remove stale ones."""
+    try:
+        with get_db_ctx() as conn:
+            rows = conn.execute(
+                "SELECT cluster_name FROM cluster_reservations "
+                "WHERE console_enabled=1 AND reserved_until >= datetime('now')"
+            ).fetchall()
+        active = {row["cluster_name"] for row in rows}
+        os.makedirs(config.CONSOLE_ACTIVATION_DIR, mode=0o755, exist_ok=True)
+        for cluster_name in active:
+            _set_console_activation_marker(cluster_name, True)
+        for filename in os.listdir(config.CONSOLE_ACTIVATION_DIR):
+            if not filename.endswith(".enabled"):
+                continue
+            cluster_name = filename[:-len(".enabled")]
+            if cluster_name not in active:
+                _set_console_activation_marker(cluster_name, False)
+    except OSError as exc:
+        app.logger.error("Unable to synchronize console activation markers: %s", exc)
+
+
 def get_cluster_reservations():
     """Get active (non-expired) cluster reservations."""
     with get_db_ctx() as conn:
         rows = conn.execute(
-            "SELECT cluster_name, reserved_by, purpose, reserved_until FROM cluster_reservations "
+            "SELECT cluster_name, reserved_by, purpose, reserved_until, console_enabled "
+            "FROM cluster_reservations "
             "WHERE reserved_until >= datetime('now') "
             "AND NOT EXISTS (SELECT 1 FROM deployments d "
             "WHERE d.cluster_name=cluster_reservations.cluster_name AND d.status='queued')"
@@ -340,6 +389,7 @@ def get_cluster_reservations():
             "reserved_by": row["reserved_by"],
             "purpose": row["purpose"],
             "reserved_until": row["reserved_until"],
+            "console_enabled": bool(row["console_enabled"]),
         }
         for row in rows
     }
@@ -794,6 +844,10 @@ def api_status():
     return jsonify(vms=vms, clusters=clusters_data, resources=resources,
                    cluster_versions=cluster_versions, cluster_info=cluster_info,
                    cluster_reservations=cluster_reservations,
+                   console_activations={
+                       name: bool(details.get("console_enabled"))
+                       for name, details in cluster_reservations.items()
+                   },
                    deployment_queue=deployment_queue,
                    total_deployments=total_deployments,
                    dhcp_map=dhcp_map, cluster_ranges=CLUSTER_IP_RANGES)
@@ -1558,8 +1612,17 @@ def user_dashboard():
                                  if name not in clusters and name not in reserved_names)
     ssh_user = derive_linux_username(session.get("user_email", ""))
     domain = config.base_domain()
+    public_host = request.host.rsplit(":", 1)[0]
     cluster_versions = get_cluster_versions(clusters)
     cluster_info = get_cluster_info(clusters)
+    console_activations = {
+        cluster_name: bool(cluster_reservations.get(cluster_name, {}).get("console_enabled"))
+        for cluster_name in clusters
+    }
+    console_urls = {
+        cluster_name: config.console_url(cluster_name, domain, public_host)
+        for cluster_name in clusters
+    }
     with get_db_ctx() as conn:
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
@@ -1580,9 +1643,12 @@ def user_dashboard():
                            cluster_slots=sorted(slots.keys()),
                            available_slots=available_slots,
                            install_types=config.INSTALL_TYPES,
+                           ocp_releases=config.OCP_RELEASES,
                            ssh_user=ssh_user, base_domain=domain,
                            cluster_versions=cluster_versions,
                            cluster_info=cluster_info,
+                           console_urls=console_urls,
+                           console_activations=console_activations,
                            cluster_reservations=cluster_reservations,
                            deployment_queue=deployment_queue,
                            total_deployments=total_deployments,
@@ -1592,6 +1658,49 @@ def user_dashboard():
                            sno_install_methods=config.SNO_INSTALL_METHODS,
                            dhcp_map=dhcp_map,
                            cluster_ranges=CLUSTER_IP_RANGES)
+
+
+@app.route("/cluster/console/activate", methods=["POST"])
+@login_required
+def activate_console():
+    """Enable BigB console forwarding for the cluster's remaining lifetime."""
+    cluster_name = request.form.get("cluster_name", "").strip()
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    _, clusters, _ = get_lab_status()
+    if cluster_name not in clusters:
+        return jsonify(error="Cluster is not active"), 404
+
+    with get_db_ctx() as conn:
+        reservation = conn.execute(
+            "SELECT reserved_until FROM cluster_reservations "
+            "WHERE cluster_name=? AND reserved_until >= datetime('now')",
+            (cluster_name,),
+        ).fetchone()
+        if not reservation:
+            return jsonify(error="Cluster lifetime has expired"), 410
+        conn.execute(
+            "UPDATE cluster_reservations SET console_enabled=1 WHERE cluster_name=?",
+            (cluster_name,),
+        )
+        conn.commit()
+
+    if not _set_console_activation_marker(cluster_name, True):
+        with get_db_ctx() as conn:
+            conn.execute(
+                "UPDATE cluster_reservations SET console_enabled=0 WHERE cluster_name=?",
+                (cluster_name,),
+            )
+            conn.commit()
+        return jsonify(error="BigB console forwarding could not be enabled"), 503
+
+    log_activity("console_activate", cluster_name)
+    public_host = request.host.rsplit(":", 1)[0]
+    return jsonify(
+        active=True,
+        url=config.console_url(cluster_name, config.base_domain(), public_host),
+    )
 
 
 # --- Cluster Management ---
@@ -1626,6 +1735,7 @@ def cluster_kubeconfig(cluster_name):
 def cluster_create():
     cluster_name = request.form.get("cluster_name", "").strip()
     ocp_version = request.form.get("ocp_version", "").strip()
+    ocp_release = request.form.get("ocp_release", "ocp4").strip()
     install_type = request.form.get("install_type", "upi").strip()
     description = request.form.get("description", "").strip()[:80]
     reservation_hours_raw = request.form.get("reservation_hours", "").strip()
@@ -1635,7 +1745,15 @@ def cluster_create():
         return redirect(url_for("user_dashboard"))
 
     if not valid_ocp_version(ocp_version):
-        flash("OCP version must look like X.Y.Z (e.g. 4.19.22).", "danger")
+        flash("OCP version must look like X.Y.Z or X.Y.Z-pre (e.g. 4.19.22 or 5.0.0-rc.2).", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    release = config.OCP_RELEASES.get(ocp_release)
+    if not release:
+        flash(f"Invalid OCP release '{ocp_release}'.", "danger")
+        return redirect(url_for("user_dashboard"))
+    if release["version"] and ocp_version != release["version"]:
+        flash(f"{release['label']} is pinned to OCP {release['version']}.", "danger")
         return redirect(url_for("user_dashboard"))
 
     needs_extension = reservation_hours_raw == "extend"
@@ -1718,7 +1836,11 @@ def cluster_create():
         return redirect(url_for("user_dashboard"))
 
     # Validate OCP version exists on the mirror
-    mirror_url = f"https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{ocp_version}/"
+    try:
+        mirror_url = config.ocp_mirror_url(ocp_version)
+    except ValueError:
+        flash("Only OCP 4.x and OCP 5.x releases are supported by this lab.", "danger")
+        return redirect(url_for("user_dashboard"))
     try:
         req = urllib.request.Request(mirror_url, method="HEAD")
         resp = urllib.request.urlopen(req, timeout=10)
@@ -1726,7 +1848,8 @@ def cluster_create():
             flash(f"OCP version {ocp_version} not found on the mirror.", "danger")
             return redirect(url_for("user_dashboard"))
     except urllib.error.HTTPError:
-        flash(f"OCP version {ocp_version} is not available. Check https://mirror.openshift.com/pub/openshift-v4/clients/ocp/ for valid versions.", "danger")
+        mirror_channel = config.ocp_mirror_channel(ocp_version)
+        flash(f"OCP version {ocp_version} is not available. Check https://mirror.openshift.com/pub/{mirror_channel}/clients/ocp/ for valid versions.", "danger")
         return redirect(url_for("user_dashboard"))
     except Exception:
         pass  # Network issue — let the deploy script handle it
@@ -1772,6 +1895,7 @@ def cluster_create():
                     (cluster_name, user_email, description)
                 )
             conn.commit()
+        _set_console_activation_marker(cluster_name, False)
         log_activity("cluster_queued", f"{cluster_name} {install_type.upper()} OCP {ocp_version} life {reservation_hours}h")
         _write_reservation_file()
         life_msg = f"reserved for {reservation_hours}h"
@@ -1943,6 +2067,8 @@ def _mark_deployment_finished(deployment_id, status, reason="", exit_code=None,
                 (row["cluster_name"],),
             )
         conn.commit()
+    if not preserve_reservation:
+        _set_console_activation_marker(row["cluster_name"], False)
     _write_reservation_file()
 
 
@@ -2039,6 +2165,7 @@ def _reconcile_orphan_reservations(clusters):
                 (row["cluster_name"],),
             )
             conn.commit()
+        _set_console_activation_marker(row["cluster_name"], False)
         _record_system_activity(
             "reservation_reconciled",
             f"released reservation for {row['cluster_name']} after {row['status']} deployment",
@@ -2444,6 +2571,8 @@ def _delete_cluster_internal(cluster_name, cluster_vms):
         conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
         conn.commit()
 
+    _set_console_activation_marker(cluster_name, False)
+
     for cluster_dir in glob.glob(f"{config.storage_dir()}/clusters/{cluster_name}-*"):
         if os.path.isdir(cluster_dir):
             try:
@@ -2493,6 +2622,7 @@ def cluster_delete():
             )
             conn.execute("DELETE FROM cluster_reservations WHERE cluster_name=?", (cluster_name,))
             conn.commit()
+        _set_console_activation_marker(cluster_name, False)
         _record_system_activity("cluster_deploy_cancelled", f"{cluster_name} cancelled while queued")
         _write_reservation_file()
         flash(f"Queued deployment '{cluster_name}' cancelled.", "success")
@@ -2564,6 +2694,21 @@ def _set_terminal_size(fd, rows, cols):
         fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
     except OSError:
         pass
+
+
+def _close_inherited_fds():
+    """Prevent terminal children from retaining the Flask listening socket."""
+    try:
+        inherited = [int(name) for name in os.listdir("/proc/self/fd")]
+    except (OSError, ValueError):
+        inherited = range(3, 1024)
+    for fd in inherited:
+        if fd < 3:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _read_pty_output(sid, fd):
@@ -2644,6 +2789,7 @@ def terminal_connect(auth=None):
 
     pid, fd = pty.fork()
     if pid == 0:
+        _close_inherited_fds()
         os.environ["TERM"] = "xterm-256color"
         try:
             if remote_machine:
@@ -2966,6 +3112,7 @@ if __name__ == "__main__":
         cli_set_password()
     else:
         init_db()
+        _sync_console_activation_markers()
         _start_deployment_scheduler()
         _start_remote_poller()
         if not config.is_setup_complete():

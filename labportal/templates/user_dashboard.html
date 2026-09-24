@@ -84,13 +84,26 @@
                     </select>
                 </div>
             </div>
+            <div class="pf-v5-c-form__group" style="min-width: 190px;">
+                <label class="pf-v5-c-form__label" for="ocp_release">
+                    <span class="pf-v5-c-form__label-text">OCP Release</span>
+                </label>
+                <div class="pf-v5-c-form__group-control">
+                    <select class="pf-v5-c-form-control" id="ocp_release" name="ocp_release" required onchange="toggleOcpRelease()">
+                        {% for key, release in ocp_releases.items() %}
+                        <option value="{{ key }}" data-version="{{ release.version }}">{{ release.label }}{% if release.version %} ({{ release.version }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
             <div class="pf-v5-c-form__group" style="min-width: 100px; max-width: 130px;">
                 <label class="pf-v5-c-form__label" for="ocp_version">
                     <span class="pf-v5-c-form__label-text">OCP Version</span>
                 </label>
                 <div class="pf-v5-c-form__group-control">
                     <input class="pf-v5-c-form-control" type="text" id="ocp_version" name="ocp_version"
-                           required placeholder="4.20.1" pattern="[0-9]+\.[0-9]+\.[0-9]+">
+                           required placeholder="4.20.1 or 5.0.0-rc.2"
+                           pattern="[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?">
                 </div>
             </div>
             <!-- UPI: slot dropdown -->
@@ -296,6 +309,19 @@
                     </span>
                     {% endif %}
                     <div class="cluster-actions">
+                        {% set console_url = console_urls.get(cluster_name) %}
+                        {% set console_active = console_activations.get(cluster_name, false) %}
+                        {% if console_url %}
+                        {% if console_active %}
+                        <a href="{{ console_url }}" target="_blank" rel="noopener noreferrer" class="pf-v5-c-button pf-m-primary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;" title="Open the cluster console through BigB">
+                            Open Console
+                        </a>
+                        {% else %}
+                        <button type="button" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem; opacity:0.62;" title="Enable BigB console forwarding for this cluster lifetime" onclick="activateConsole('{{ cluster_name }}', this)">
+                            Enable Console
+                        </button>
+                        {% endif %}
+                        {% endif %}
                         <a href="{{ url_for('user_terminal', cluster=cluster_name) }}" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">
                             &#x25B6; Terminal
                         </a>
@@ -380,12 +406,8 @@
                 <pre class="code-block" style="margin:0;"><code id="cli-modal-console"></code></pre>
                 <button onclick="copyText('cli-modal-console', this)" class="copy-btn" title="Copy">&#x2398;</button>
             </div>
-            <p style="font-size:0.82rem; color:#8a8d90; margin-top:0.5rem;">To access the console from your local browser, set up a SOCKS proxy:</p>
-            <div style="position:relative; margin-bottom:0.4rem;">
-                <pre class="code-block" style="margin:0;"><code id="cli-modal-socks"></code></pre>
-                <button onclick="copyText('cli-modal-socks', this)" class="copy-btn" title="Copy">&#x2398;</button>
-            </div>
-            <p style="font-size:0.82rem; color:#8a8d90;">Then configure your browser to use <code>localhost:9090</code> as a SOCKS5 proxy (enable "Proxy DNS" / "DNS over SOCKS"), and open the console URL above.</p>
+            <a id="cli-modal-console-link" href="#" target="_blank" rel="noopener noreferrer" class="pf-v5-c-button pf-m-primary pf-m-small" style="display:none; margin-top:0.5rem;">Open Console</a>
+            <p id="cli-modal-console-help" style="font-size:0.82rem; color:#8a8d90; margin-top:0.5rem;">BigB forwards this console directly; no local proxy is required.</p>
         </div>
 
         <div style="margin-bottom:1rem; border-top:1px solid #3c3f42; padding-top:1rem;">
@@ -420,6 +442,26 @@ var HOSTNAME = "{{ hostname }}";
 var BASE_DOMAIN = "{{ base_domain }}";
 var CURRENT_USER = "{{ session.get('user_email', '') }}";
 var IS_ADMIN = {{ 'true' if session.get('admin') else 'false' }};
+var CONSOLE_URLS = {{ console_urls|tojson }};
+var CONSOLE_ACTIVATIONS = {{ console_activations|tojson }};
+var ACTIVATE_CONSOLE_URL = "{{ url_for('activate_console') }}";
+
+function toggleOcpRelease() {
+    var sel = document.getElementById('ocp_release');
+    var opt = sel.options[sel.selectedIndex];
+    var versionInput = document.getElementById('ocp_version');
+    var pinnedVersion = opt.getAttribute('data-version');
+
+    if (pinnedVersion) {
+        versionInput.value = pinnedVersion;
+        versionInput.readOnly = true;
+        versionInput.title = 'Pinned by the selected release';
+    } else {
+        if (versionInput.readOnly) versionInput.value = '';
+        versionInput.readOnly = false;
+        versionInput.title = '';
+    }
+}
 
 function toggleInstallType() {
     var sel = document.getElementById('install_type');
@@ -450,6 +492,7 @@ function toggleInstallType() {
 
 // Fix form: copy the correct name field into cluster_name before submit
 document.addEventListener('DOMContentLoaded', function() {
+    toggleOcpRelease();
     toggleInstallType();
     document.getElementById('deploy-form').addEventListener('submit', function(e) {
         var sel = document.getElementById('install_type');
@@ -501,15 +544,69 @@ function showCopied(btn) {
     setTimeout(function() { btn.innerHTML = orig; btn.style.color = ''; }, 1500);
 }
 
+function activateConsole(clusterName, sourceButton) {
+    var popup = window.open('about:blank', '_blank');
+    sourceButton.disabled = true;
+    sourceButton.textContent = 'Enabling...';
+    fetch(ACTIVATE_CONSOLE_URL, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'cluster_name=' + encodeURIComponent(clusterName)
+    }).then(function(response) {
+        return response.json().then(function(data) {
+            if (!response.ok) throw new Error(data.error || 'Unable to enable console forwarding');
+            return data;
+        });
+    }).then(function(data) {
+        CONSOLE_ACTIVATIONS[clusterName] = true;
+        if (data.url) CONSOLE_URLS[clusterName] = data.url;
+        var consoleUrl = CONSOLE_URLS[clusterName];
+        if (popup) {
+            popup.location = consoleUrl;
+        } else {
+            window.open(consoleUrl, '_blank');
+        }
+        sourceButton.outerHTML = '<a href="' + consoleUrl + '" target="_blank" rel="noopener noreferrer" class="pf-v5-c-button pf-m-primary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open the cluster console through BigB">Open Console</a>';
+    }).catch(function(error) {
+        if (popup) popup.close();
+        sourceButton.disabled = false;
+        sourceButton.textContent = 'Enable Console';
+        alert(error.message);
+    });
+}
+
 function showCliModal(clusterName, version) {
     document.getElementById('cli-modal-title').textContent = 'CLI Access — ' + clusterName;
     var dirName = version ? (clusterName + '-' + version) : (clusterName + '-*');
     document.getElementById('cli-modal-kubeconfig').textContent =
         'export KUBECONFIG=/kvm/clusters/' + dirName + '/auth/kubeconfig';
-    document.getElementById('cli-modal-console').textContent =
+    var canonicalConsoleUrl =
         'https://console-openshift-console.apps.' + clusterName + '.' + BASE_DOMAIN;
-    document.getElementById('cli-modal-socks').textContent =
-        'ssh -D 9090 -N -f ' + SSH_USER + '@' + HOSTNAME;
+    var directConsoleUrl = CONSOLE_URLS[clusterName] || '';
+    document.getElementById('cli-modal-console').textContent =
+        directConsoleUrl || canonicalConsoleUrl;
+    var consoleLink = document.getElementById('cli-modal-console-link');
+    var consoleHelp = document.getElementById('cli-modal-console-help');
+    if (directConsoleUrl) {
+        consoleLink.href = directConsoleUrl;
+        consoleLink.style.display = 'inline-flex';
+        if (CONSOLE_ACTIVATIONS[clusterName]) {
+            consoleLink.textContent = 'Open Console';
+            consoleLink.onclick = null;
+            consoleHelp.textContent = 'BigB forwards this console directly; no local proxy is required.';
+        } else {
+            consoleLink.textContent = 'Enable & Open Console';
+            consoleLink.onclick = function(event) {
+                event.preventDefault();
+                activateConsole(clusterName, consoleLink);
+            };
+            consoleHelp.textContent = 'Click once to enable BigB forwarding for the cluster lifetime.';
+        }
+    } else {
+        consoleLink.style.display = 'none';
+        consoleHelp.textContent = 'Direct BigB forwarding is not configured for this cluster.';
+    }
     var downloadUrl = '/labs/cluster/kubeconfig/' + clusterName;
     document.getElementById('cli-modal-download').href = downloadUrl;
     document.getElementById('cli-modal-scp').textContent =
@@ -619,6 +716,7 @@ document.addEventListener('keydown', function(e) {
                 const versions = data.cluster_versions || {};
                 const cInfo = data.cluster_info || {};
                 const cRes = data.cluster_reservations || {};
+                CONSOLE_ACTIVATIONS = data.console_activations || {};
                 const dhcpMap = data.dhcp_map || {};
                 const clusterRanges = data.cluster_ranges || {};
                 clusterNames.forEach(name => {
@@ -645,6 +743,14 @@ document.addEventListener('keydown', function(e) {
                     }
                     var ver = versions[name] || '';
                     html += '<div class="cluster-actions">';
+                    var directConsoleUrl = CONSOLE_URLS[name] || '';
+                    if (directConsoleUrl) {
+                        if (CONSOLE_ACTIVATIONS[name]) {
+                            html += '<a href="' + directConsoleUrl + '" target="_blank" rel="noopener noreferrer" class="pf-v5-c-button pf-m-primary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open the cluster console through BigB">Open Console</a>';
+                        } else {
+                            html += '<button type="button" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;opacity:0.62;" title="Enable BigB console forwarding for this cluster lifetime" onclick="activateConsole(\'' + name + '\', this)">Enable Console</button>';
+                        }
+                    }
                     html += '<a href="/labs/user/terminal?cluster=' + name + '" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">&#x25B6; Terminal</a>';
                     html += '<button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showCliModal(\'' + name + '\', \'' + ver + '\')">CLI Access</button>';
                     html += '<a href="/labs/cluster/logs/' + name + '" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">View Logs</a>';
