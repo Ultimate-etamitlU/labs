@@ -45,9 +45,18 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+case "$VERSION" in
+    4.*) MIRROR_CHANNEL="openshift-v4" ;;
+    5.*) MIRROR_CHANNEL="openshift-v5" ;;
+    *)
+        echo "Unsupported OCP version '$VERSION'. Supported major versions: 4.x and 5.x."
+        exit 1
+        ;;
+esac
+
 BASE_DIR="$STORAGE_DIR/client_tools/$VERSION"
 INSTALL_DIR="$STORAGE_DIR/clusters/${CLUSTER_NAME}-${VERSION}"
-MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
+MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERSION"
 
 # Networking
 PROV_BRIDGE="provisioning"

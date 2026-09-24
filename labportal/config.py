@@ -14,6 +14,14 @@ SECRET_KEY = _secret or secrets.token_hex(32)
 # Database path — must be known before DB exists
 DB_PATH = os.environ.get("LABPORTAL_DB", os.path.join(BASE_DIR, "labportal.db"))
 
+# Direct web-console forwarding ports on the lab host.  The infrastructure
+# setup assigns these in cluster-slot order, so the portal and HAProxy use the
+# same stable mapping (upi1 -> 6100, upi2 -> 6101, ...).
+CONSOLE_PORT_BASE = int(os.environ.get("LABPORTAL_CONSOLE_PORT_BASE", "6100"))
+CONSOLE_ACTIVATION_DIR = os.environ.get(
+    "LABPORTAL_CONSOLE_ACTIVATION_DIR", "/var/lib/labportal-console"
+)
+
 # Deploy script paths — host-level config, not portal-level
 DEPLOY_SCRIPT = os.environ.get("LABPORTAL_DEPLOY_SCRIPT", "/root/labs/ocp-upi-deploy.sh")
 
@@ -43,6 +51,34 @@ INSTALL_TYPES = {
         "remote": True,
     },
 }
+
+# Release presets shown in the deployment form.  OCP 5.0.0-rc.2 is pinned
+# because this is the temporary EC2 release being exposed on the lab host.
+OCP_RELEASES = {
+    "ocp4": {
+        "label": "OpenShift 4.x",
+        "version": "",
+    },
+    "ocp5-ec2": {
+        "label": "OpenShift 5.0 - EC2",
+        "version": "5.0.0-rc.2",
+    },
+}
+
+
+def ocp_mirror_channel(version):
+    """Return the mirror channel for a supported OCP version."""
+    if version.startswith("4."):
+        return "openshift-v4"
+    if version.startswith("5."):
+        return "openshift-v5"
+    raise ValueError(f"Unsupported OCP major version: {version}")
+
+
+def ocp_mirror_url(version):
+    """Return the exact client-tool directory for an OCP version."""
+    channel = ocp_mirror_channel(version)
+    return f"https://mirror.openshift.com/pub/{channel}/clients/ocp/{version}/"
 
 SNO_SLOTS = {
     "sno1": {"ip_suffix": 10, "ip": "192.168.200.10", "mac": "52:54:00:c8:00:10"},
@@ -164,6 +200,32 @@ def cluster_slots():
         return {k: int(v) for k, v in slots.items()}
     except (json.JSONDecodeError, ValueError):
         return {}
+
+
+def console_ports():
+    """Return the direct BigB console port for each configured UPI slot."""
+    ordered_slots = sorted(cluster_slots().items(), key=lambda item: (item[1], item[0]))
+    return {
+        cluster_name: CONSOLE_PORT_BASE + index
+        for index, (cluster_name, _offset) in enumerate(ordered_slots)
+    }
+
+
+def console_url(cluster_name, domain=None, public_host=None):
+    """Return the direct console URL, or None when no forwarding is defined.
+
+    The cluster DNS name is intentionally private to BigB. When the portal
+    supplies its reachable host, the browser stays on BigB while the server
+    proxy maps the request to the private OpenShift console and OAuth routes.
+    """
+    port = console_ports().get(cluster_name)
+    if port is None:
+        return None
+    if public_host:
+        return f"https://{public_host}:{port}"
+    domain = domain or base_domain()
+    return f"https://console-openshift-console.apps.{cluster_name}.{domain}:{port}"
+
 
 def admin_email():
     return get_site("admin_email", "")

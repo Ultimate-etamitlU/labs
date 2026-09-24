@@ -268,7 +268,37 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now labportal
 ```
 
-### 3. Apache Reverse Proxy
+### 3. BigB Web Console Forwarding
+
+`cluster-infra-setup.sh` creates one HTTPS listener and reverse proxy for each
+configured UPI slot. By default the mapping is:
+
+| Cluster | BigB port |
+|---------|-----------|
+| `upi1` | `6100` |
+| `upi2` | `6101` |
+| `upi3` | `6102` |
+
+The portal shows a grey **Enable Console** button for each active cluster. The
+first click enables forwarding for the remainder of that cluster's lifetime;
+subsequent clicks use **Open Console**. The browser stays on BigB, for example:
+
+```text
+https://lab.example.com:6100
+```
+
+HAProxy terminates TLS on BigB and forwards to an Apache proxy bound locally.
+Apache sends console and OAuth requests to the private cluster routes, so the
+browser needs no SOCKS proxy, local tunnel, or access to the internal cluster
+DNS names. The existing portal certificate and key are reused for these
+listeners.
+
+Override the defaults with `LABPORTAL_CONSOLE_PORT_BASE` and
+`LABPORTAL_CONSOLE_BIND_IP`. `LABPORTAL_CONSOLE_PROXY_BASE_PORT` controls the
+local Apache listener range, and `LABPORTAL_CONSOLE_ACTIVATION_DIR` controls
+the marker directory shared by the portal and Apache.
+
+### 4. Apache Reverse Proxy
 
 Generate a self-signed certificate (or use your own):
 
@@ -317,6 +347,8 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | Path to IPI deploy script |
 | `LABPORTAL_QUEUE_INTERVAL` | `10` seconds | Scheduler poll interval |
 | `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
+| `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; subsequent slots use the next ports |
+| `LABPORTAL_CONSOLE_BIND_IP` | `0.0.0.0` | Host address on which direct console listeners bind |
 | `CLUSTERS_DIR` | `/kvm/clusters` | Directory where cluster artifacts are stored |
 | `PULL_SECRET_FILE` | `/root/pull-secret.txt` | Path to OpenShift pull secret |
 | `SSH_KEY_FILE` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
@@ -331,6 +363,7 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 | Firewall | Default-deny; only required ports are opened per zone |
 | VBMC ports | UDP 6230-6260 opened in `libvirt` zone only (for ironic on provisioning network) |
 | VNC | Bound to `127.0.0.1` only — not exposed to the network |
+| Direct console ports | TCP `6100` onward, one port per configured UPI slot; restrict these ports to the lab-user network when a host firewall is enabled |
 | DNS zone files | Owned by `named:named` with `named_zone_t` SELinux context; IPI uses separate include files owned by `root:named` |
 | Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
 | SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity, forced password change on first login |

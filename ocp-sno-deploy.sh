@@ -49,6 +49,15 @@ if [ -z "$VERSION" ] || [ -z "$CLUSTER_NAME" ] || [ -z "$TARGET_HOST" ]; then
     exit 1
 fi
 
+case "$VERSION" in
+    4.*) MIRROR_CHANNEL="openshift-v4" ;;
+    5.*) MIRROR_CHANNEL="openshift-v5" ;;
+    *)
+        echo "Unsupported OCP version '$VERSION'. Supported major versions: 4.x and 5.x."
+        exit 1
+        ;;
+esac
+
 # --- SNO slot definitions ---
 SNO_SUBNET="192.168.200"
 BRIDGE_IP="${SNO_SUBNET}.1"
@@ -78,7 +87,7 @@ NODE_IP="${SNO_SUBNET}.${IP_SUFFIX}"
 NODE_MAC="${SNO_MACS[$CLUSTER_NAME]}"
 VM_NAME="vm-${CLUSTER_NAME}-master-0"
 
-MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
+MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERSION"
 REMOTE_CLUSTERS_DIR="/kvm/clusters"
 # shellcheck disable=SC2034
 REMOTE_IMAGES_DIR="/kvm/images"

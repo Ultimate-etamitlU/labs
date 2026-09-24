@@ -28,6 +28,7 @@ labs/
 - **Lifecycle**: Background reaper thread auto-deletes expired clusters every 5 min
 - **Terminal**: Browser-based xterm.js over SocketIO with 1-hour inactivity timeout
 - **UPI**: Fixed slots (upi1/upi2/upi3) with pre-configured DNS + HAProxy
+- **Console**: BigB TLS termination plus Apache console/OAuth proxy (upi1:6100, upi2:6101, upi3:6102 by default); forwarding is activated once per cluster lifetime
 - **IPI**: Fixed slots (ipi1/ipi2/ipi3) with 15-IP blocks from range 200-244 with VBMC/ironic
 
 ## Lab System Rules
