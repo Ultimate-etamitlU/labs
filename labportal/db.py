@@ -79,7 +79,8 @@ def init_db():
             reserved_by TEXT NOT NULL,
             purpose TEXT NOT NULL DEFAULT '',
             reserved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            reserved_until TIMESTAMP NOT NULL
+            reserved_until TIMESTAMP NOT NULL,
+            console_enabled INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS cluster_extension_requests (
@@ -164,6 +165,14 @@ def init_db():
         conn.execute("SELECT machine_id FROM deployments LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE deployments ADD COLUMN machine_id INTEGER")
+
+    try:
+        conn.execute("SELECT console_enabled FROM cluster_reservations LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE cluster_reservations "
+            "ADD COLUMN console_enabled INTEGER NOT NULL DEFAULT 0"
+        )
 
     try:
         conn.execute("SELECT role FROM lab_machines LIMIT 1")

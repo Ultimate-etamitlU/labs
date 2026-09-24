@@ -32,10 +32,19 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+case "$VERSION" in
+    4.*) MIRROR_CHANNEL="openshift-v4" ;;
+    5.*) MIRROR_CHANNEL="openshift-v5" ;;
+    *)
+        echo "Unsupported OCP version '$VERSION'. Supported major versions: 4.x and 5.x."
+        exit 1
+        ;;
+esac
+
 # Use Absolute Paths to prevent path resolution errors
 BASE_DIR="$STORAGE_DIR/client_tools/$VERSION"
 INSTALL_DIR="$STORAGE_DIR/clusters/${CLUSTER_NAME}-${VERSION}"
-MIRROR_URL="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION"
+MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERSION"
 
 # Networking — each cluster gets a unique IP block based on cluster name hash
 # Default network: 192.168.122.0/24
