@@ -91,6 +91,18 @@ SNO_INSTALL_METHODS = {
     "upi-bip": "UPI (Bootstrap-in-Place)",
 }
 
+
+def sno_deployments_enabled():
+    """Whether the portal may accept new SNO deployments."""
+    value = os.environ.get("LABPORTAL_ALLOW_SNO", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def sno_target_roles():
+    """Return machine roles available for new SNO deployments."""
+    return ("boss", "peer") if sno_deployments_enabled() else ()
+
+
 # IPI fixed slots — 15-IP blocks from 200-244
 IPI_SLOTS = {
     "ipi1": 200,

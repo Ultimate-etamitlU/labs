@@ -71,6 +71,9 @@
         <h2>Deploy New Cluster</h2>
     </div>
     <div class="dash-card-body">
+        {% if not sno_deployments_enabled %}
+        <p class="pf-v5-c-form__helper-text" style="margin-bottom: 1rem;">New SNO deployments are temporarily paused. Existing SNO clusters, access, and cleanup are unaffected.</p>
+        {% endif %}
         <form method="post" action="{{ url_for('cluster_create') }}" id="deploy-form" class="pf-v5-c-form" style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;">
             <div class="pf-v5-c-form__group" style="min-width: 160px;">
                 <label class="pf-v5-c-form__label" for="install_type">

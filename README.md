@@ -157,6 +157,8 @@ The portal admits only one installer process at a time across UPI, IPI, and SNO.
 
 The queue is visible only while a request is queued or an installer is running. Each queued request shows its position and the reason it is waiting. When the active IPI reservation has a valid expiry, the portal shows a conservative start estimate that includes a cleanup buffer; otherwise it reports that the ETA is unavailable and provides a **Request admin review** action. The action sends an auditable message to the portal admin and never bypasses the queue or releases a cluster.
 
+New SNO deployments are temporarily paused by default. Set `LABPORTAL_ALLOW_SNO=true` to allow new SNO deployments on peer or boss machines. This setting does not affect existing SNO clusters, their access, or their cleanup.
+
 ### UPI (User Provisioned Infrastructure)
 
 Pre-configured slots with fixed DNS and HAProxy — no service restarts needed when deploying or deleting clusters.
@@ -356,6 +358,7 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_HOSTNAME` | `lab.example.com` | Hostname shown in UI |
 | `LABPORTAL_UPI_SCRIPT` | `/root/labs/ocp-upi-deploy.sh` | Path to UPI deploy script |
 | `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | Path to IPI deploy script |
+| `LABPORTAL_ALLOW_SNO` | `false` | Allow new SNO deployments on peer and boss machines (`true`, `yes`, `on`, or `1`) |
 | `LABPORTAL_QUEUE_INTERVAL` | `10` seconds | Scheduler poll interval |
 | `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
 | `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; UPI slots come first, followed by IPI slots |
