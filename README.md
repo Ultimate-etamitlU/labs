@@ -191,7 +191,7 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 | Spare | `.offset+10` through `.offset+14` |
 | Provisioning | PXE boot via ironic over `provisioning` network (`192.168.0.0/24`) |
 | BMC | VirtualBMC (VBMC) exposes VMs as IPMI endpoints for the installer |
-| DNS | Dynamic records in include files (`/var/named/ipi-forward.include`, `ipi-reverse.include`) |
+| DNS | API, wildcard apps, and node records for each fixed slot in the managed forward/reverse zones |
 | HAProxy | Not needed — IPI uses keepalived VIPs on the nodes |
 | Bootstrap | Created and destroyed automatically by `openshift-install` |
 
@@ -247,7 +247,7 @@ The script will:
 - Check that `named`, `haproxy`, and `libvirtd` are installed
 - Warn before overwriting existing configs not created by this script
 - Back up any existing configs before replacing them
-- Generate forward/reverse DNS zones for `upi1`, `upi2`, `upi3`
+- Generate forward/reverse DNS records for configured UPI and fixed IPI slots
 - Generate HAProxy config with SNI-based routing
 - Validate and reload both services
 - Verify DNS resolution
@@ -375,7 +375,7 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 | VBMC ports | UDP 6230-6260 opened in `libvirt` zone only (for ironic on provisioning network) |
 | VNC | Bound to `127.0.0.1` only — not exposed to the network |
 | Direct console ports | TCP `6100` onward, one port per configured UPI and fixed IPI slot; restrict these ports to the lab-user network when a host firewall is enabled |
-| DNS zone files | Owned by `named:named` with `named_zone_t` SELinux context; IPI uses separate include files owned by `root:named` |
+| DNS zone files | UPI and IPI records are generated in managed forward/reverse zones owned by `named:named` with `named_zone_t` SELinux context |
 | Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
 | SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity, forced password change on first login |
 
