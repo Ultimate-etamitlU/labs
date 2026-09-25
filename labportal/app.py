@@ -44,6 +44,7 @@ from deployment_queue import (
     running_statuses_sql,
     sql_statuses,
 )
+from terminal_fds import close_inherited_fds as _close_inherited_fds
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -1638,10 +1639,18 @@ def user_dashboard():
         total_deployments = conn.execute(
             "SELECT COUNT(*) FROM activity_log WHERE event='cluster_deploy'"
         ).fetchone()[0]
-    with get_db_ctx() as conn:
-        lab_machines = conn.execute(
-            "SELECT id, name, status, specs_json FROM lab_machines WHERE role IN ('peer','boss') AND status='ready'"
-        ).fetchall()
+    sno_enabled = config.sno_deployments_enabled()
+    target_roles = config.sno_target_roles()
+    if target_roles:
+        role_placeholders = ", ".join("?" for _ in target_roles)
+        with get_db_ctx() as conn:
+            lab_machines = conn.execute(
+                f"SELECT id, name, status, specs_json FROM lab_machines "
+                f"WHERE role IN ({role_placeholders}) AND status='ready'",
+                target_roles,
+            ).fetchall()
+    else:
+        lab_machines = []
     lab_machines_list = []
     for m in lab_machines:
         specs = json.loads(m["specs_json"]) if m["specs_json"] else {}
@@ -1653,7 +1662,12 @@ def user_dashboard():
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
                            available_slots=available_slots,
-                           install_types=config.INSTALL_TYPES,
+                           install_types={
+                               name: install_type
+                               for name, install_type in config.INSTALL_TYPES.items()
+                               if name != "sno" or sno_enabled
+                           },
+                           sno_deployments_enabled=sno_enabled,
                            ocp_releases=config.OCP_RELEASES,
                            ssh_user=ssh_user, base_domain=domain,
                            cluster_versions=cluster_versions,
@@ -1795,6 +1809,13 @@ def cluster_create():
     install_method = None
 
     if install_type == "sno":
+        if not config.sno_deployments_enabled():
+            flash(
+                "New SNO deployments are temporarily paused. "
+                "Existing SNO clusters, access, and cleanup are unaffected.",
+                "warning",
+            )
+            return redirect(url_for("user_dashboard"))
         # SNO: validate slot, target machine, install method
         if cluster_name not in config.SNO_SLOTS:
             flash(f"Invalid SNO slot '{cluster_name}'. Choose from: {', '.join(sorted(config.SNO_SLOTS))}.", "danger")
@@ -1810,11 +1831,18 @@ def cluster_create():
             return redirect(url_for("user_dashboard"))
         with get_db_ctx() as conn:
             machine = conn.execute(
-                "SELECT id, hostname, ssh_user, ssh_port, status FROM lab_machines WHERE id=? AND role IN ('peer','boss')",
+                "SELECT id, hostname, ssh_user, ssh_port, status, role "
+                "FROM lab_machines WHERE id=? AND role IN ('peer','boss')",
                 (target_machine,)
             ).fetchone()
         if not machine:
             flash("Selected target machine not found.", "danger")
+            return redirect(url_for("user_dashboard"))
+        if machine["role"] not in config.sno_target_roles():
+            flash(
+                "The selected machine role is not enabled for new SNO deployments.",
+                "warning",
+            )
             return redirect(url_for("user_dashboard"))
         if machine["status"] != "ready":
             flash(f"Target machine is not ready (status: {machine['status']}).", "danger")
@@ -2710,21 +2738,6 @@ def _set_terminal_size(fd, rows, cols):
         fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
     except OSError:
         pass
-
-
-def _close_inherited_fds():
-    """Prevent terminal children from retaining the Flask listening socket."""
-    try:
-        inherited = [int(name) for name in os.listdir("/proc/self/fd")]
-    except (OSError, ValueError):
-        inherited = range(3, 1024)
-    for fd in inherited:
-        if fd < 3:
-            continue
-        try:
-            os.close(fd)
-        except OSError:
-            pass
 
 
 def _read_pty_output(sid, fd):
