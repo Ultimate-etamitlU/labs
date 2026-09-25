@@ -14,9 +14,9 @@ SECRET_KEY = _secret or secrets.token_hex(32)
 # Database path — must be known before DB exists
 DB_PATH = os.environ.get("LABPORTAL_DB", os.path.join(BASE_DIR, "labportal.db"))
 
-# Direct web-console forwarding ports on the lab host.  The infrastructure
-# setup assigns these in cluster-slot order, so the portal and HAProxy use the
-# same stable mapping (upi1 -> 6100, upi2 -> 6101, ...).
+# Direct web-console forwarding ports on the lab host. UPI slots use their
+# configured order, followed by the fixed IPI slots, so the portal and
+# infrastructure setup share one stable mapping.
 CONSOLE_PORT_BASE = int(os.environ.get("LABPORTAL_CONSOLE_PORT_BASE", "6100"))
 CONSOLE_ACTIVATION_DIR = os.environ.get(
     "LABPORTAL_CONSOLE_ACTIVATION_DIR", "/var/lib/labportal-console"
@@ -202,12 +202,18 @@ def cluster_slots():
         return {}
 
 
+def console_cluster_order():
+    """Return console-enabled slots: configured UPI slots, then fixed IPI slots."""
+    upi_slots = sorted(cluster_slots().items(), key=lambda item: (item[1], item[0]))
+    ipi_slots_ordered = sorted(ipi_slots().items(), key=lambda item: (item[1], item[0]))
+    return [name for name, _offset in upi_slots + ipi_slots_ordered]
+
+
 def console_ports():
-    """Return the direct BigB console port for each configured UPI slot."""
-    ordered_slots = sorted(cluster_slots().items(), key=lambda item: (item[1], item[0]))
+    """Return the direct BigB console port for each configured UPI and IPI slot."""
     return {
         cluster_name: CONSOLE_PORT_BASE + index
-        for index, (cluster_name, _offset) in enumerate(ordered_slots)
+        for index, cluster_name in enumerate(console_cluster_order())
     }
 
 

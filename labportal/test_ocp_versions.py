@@ -23,7 +23,13 @@ class OcpVersionTests(unittest.TestCase):
 
     def test_direct_console_ports_follow_slot_order(self):
         with patch("config.cluster_slots", return_value={"upi2": 131, "upi1": 110}):
-            self.assertEqual(console_ports(), {"upi1": 6100, "upi2": 6101})
+            self.assertEqual(console_ports(), {
+                "upi1": 6100,
+                "upi2": 6101,
+                "ipi1": 6102,
+                "ipi2": 6103,
+                "ipi3": 6104,
+            })
             self.assertEqual(
                 console_url("upi2", "example.com"),
                 "https://console-openshift-console.apps.upi2.example.com:6101",
