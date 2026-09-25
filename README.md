@@ -271,13 +271,24 @@ sudo systemctl enable --now labportal
 ### 3. BigB Web Console Forwarding
 
 `cluster-infra-setup.sh` creates one HTTPS listener and reverse proxy for each
-configured UPI slot. By default the mapping is:
+configured UPI slot and each fixed IPI slot. With the default three UPI slots,
+the mapping is:
 
 | Cluster | BigB port |
 |---------|-----------|
 | `upi1` | `6100` |
 | `upi2` | `6101` |
 | `upi3` | `6102` |
+| `ipi1` | `6103` |
+| `ipi2` | `6104` |
+| `ipi3` | `6105` |
+
+IPI ports follow the configured UPI slots, so their numbers move if the UPI
+slot count changes. IPI console requests use the cluster's `*.apps` DNS record
+and Ingress VIP.
+
+After updating the portal files, rerun `cluster-infra-setup.sh` on the lab
+host to generate and reload the IPI listeners and Apache proxy entries.
 
 The portal shows a grey **Enable Console** button for each active cluster. The
 first click enables forwarding for the remainder of that cluster's lifetime;
@@ -347,7 +358,7 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | Path to IPI deploy script |
 | `LABPORTAL_QUEUE_INTERVAL` | `10` seconds | Scheduler poll interval |
 | `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
-| `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; subsequent slots use the next ports |
+| `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; UPI slots come first, followed by IPI slots |
 | `LABPORTAL_CONSOLE_BIND_IP` | `0.0.0.0` | Host address on which direct console listeners bind |
 | `CLUSTERS_DIR` | `/kvm/clusters` | Directory where cluster artifacts are stored |
 | `PULL_SECRET_FILE` | `/root/pull-secret.txt` | Path to OpenShift pull secret |
@@ -363,7 +374,7 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 | Firewall | Default-deny; only required ports are opened per zone |
 | VBMC ports | UDP 6230-6260 opened in `libvirt` zone only (for ironic on provisioning network) |
 | VNC | Bound to `127.0.0.1` only — not exposed to the network |
-| Direct console ports | TCP `6100` onward, one port per configured UPI slot; restrict these ports to the lab-user network when a host firewall is enabled |
+| Direct console ports | TCP `6100` onward, one port per configured UPI and fixed IPI slot; restrict these ports to the lab-user network when a host firewall is enabled |
 | DNS zone files | Owned by `named:named` with `named_zone_t` SELinux context; IPI uses separate include files owned by `root:named` |
 | Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
 | SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity, forced password change on first login |

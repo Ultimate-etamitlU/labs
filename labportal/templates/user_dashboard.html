@@ -716,6 +716,7 @@ document.addEventListener('keydown', function(e) {
                 const versions = data.cluster_versions || {};
                 const cInfo = data.cluster_info || {};
                 const cRes = data.cluster_reservations || {};
+                CONSOLE_URLS = data.console_urls || {};
                 CONSOLE_ACTIVATIONS = data.console_activations || {};
                 const dhcpMap = data.dhcp_map || {};
                 const clusterRanges = data.cluster_ranges || {};

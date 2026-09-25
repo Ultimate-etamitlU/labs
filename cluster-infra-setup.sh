@@ -2,7 +2,8 @@
 # =============================================================================
 # OCP Lab Portal — DNS (BIND) + HAProxy infrastructure setup
 #
-# One-time setup for predefined cluster slots (upi1, upi2, upi3).
+# One-time DNS/HAProxy setup for configured UPI slots. Console forwarding
+# also covers the fixed IPI slots, which use their own Ingress VIPs.
 # After this runs once, no service restarts are needed when deploying
 # or deleting clusters — HAProxy health checks handle backend availability.
 #
@@ -31,7 +32,7 @@ fi
 # Allow env/arg overrides
 DOMAIN="${BASE_DOMAIN:-example.com}"
 
-# Direct console forwarding. Each configured slot gets one external listener.
+# Direct console forwarding. Each UPI and IPI slot gets one external listener.
 # The listener terminates TLS on BigB so browsers can use BigB's reachable
 # address; Apache then proxies the console and OAuth routes to the private
 # cluster ingress and rewrites private route names in responses.
@@ -66,6 +67,19 @@ for entry in $CLUSTER_SLOTS; do
     CLUSTERS[$cname]=$coffset
     CLUSTER_ORDER+=("$cname")
 done
+
+# IPI slots are separate from the UPI API/ingress load-balancer config, but
+# share the console port range. Keep this order aligned with config.console_ports().
+IPI_SLOTS="${IPI_SLOTS:-ipi1:200 ipi2:215 ipi3:230}"
+declare -A IPI_CLUSTERS=()
+IPI_CLUSTER_ORDER=()
+for entry in $IPI_SLOTS; do
+    cname="${entry%%:*}"
+    coffset="${entry##*:}"
+    IPI_CLUSTERS[$cname]=$coffset
+    IPI_CLUSTER_ORDER+=("$cname")
+done
+CONSOLE_CLUSTER_ORDER=("${CLUSTER_ORDER[@]}" "${IPI_CLUSTER_ORDER[@]}")
 
 FORWARD_ZONE="/var/named/forward.${DOMAIN}"
 REVERSE_ZONE="/var/named/reverse.${DOMAIN}"
@@ -381,8 +395,8 @@ ${MANAGED_BY}
 ProxyRequests Off
 APACHEHEAD
 
-    for index in "${!CLUSTER_ORDER[@]}"; do
-        cname="${CLUSTER_ORDER[$index]}"
+    for index in "${!CONSOLE_CLUSTER_ORDER[@]}"; do
+        cname="${CONSOLE_CLUSTER_ORDER[$index]}"
         console_port=$((CONSOLE_PORT_BASE + index))
         proxy_port=$((CONSOLE_PROXY_BASE_PORT + index))
         CONSOLE_PROXY_PORTS["$cname"]="$proxy_port"
@@ -461,8 +475,8 @@ else
 fi
 
 # Direct web-console forwarding — fixed port per cluster slot.
-for index in "${!CLUSTER_ORDER[@]}"; do
-    cname="${CLUSTER_ORDER[$index]}"
+for index in "${!CONSOLE_CLUSTER_ORDER[@]}"; do
+    cname="${CONSOLE_CLUSTER_ORDER[$index]}"
     console_port=$((CONSOLE_PORT_BASE + index))
     CONSOLE_PORT_NUMBERS+=("$console_port")
     if [ "$CONSOLE_PROXY_ENABLED" = true ]; then
@@ -475,14 +489,28 @@ frontend console-${cname}-${console_port}
   default_backend console-proxy-${cname}-${console_port}
 HACONSOLE
     else
+        if [[ -n "${IPI_CLUSTERS[$cname]+x}" ]]; then
+            ipi_offset="${IPI_CLUSTERS[$cname]}"
+            fallback_backend="console-ingress-${cname}-${console_port}"
+        else
+            fallback_backend="ingress-https-${cname}-443"
+        fi
         cat >> "$HAPROXY_CFG" << HACONSOLE
 
 # Direct console for ${cname}; TLS/SNI is passed through unchanged.
 frontend console-${cname}-${console_port}
   bind ${CONSOLE_BIND_IP}:${console_port}
   mode tcp
-  default_backend ingress-https-${cname}-443
+  default_backend ${fallback_backend}
 HACONSOLE
+        if [[ -n "${IPI_CLUSTERS[$cname]+x}" ]]; then
+            cat >> "$HAPROXY_CFG" << HACONSOLEBACKEND
+
+backend ${fallback_backend}
+  mode tcp
+  server ${cname}-ingress ${SUBNET}.$((ipi_offset + 1)):443 check inter 1s
+HACONSOLEBACKEND
+        fi
     fi
 done
 
@@ -531,17 +559,21 @@ backend ingress-http-${cname}-80
   server ${cname}-worker-1 ${W1}:80 check inter 1s
 HABACK
 
-    if [ "$CONSOLE_PROXY_ENABLED" = true ]; then
+done
+
+if [ "$CONSOLE_PROXY_ENABLED" = true ]; then
+    for index in "${!CONSOLE_CLUSTER_ORDER[@]}"; do
+        cname="${CONSOLE_CLUSTER_ORDER[$index]}"
         proxy_port="${CONSOLE_PROXY_PORTS[$cname]}"
-        console_port=$((CONSOLE_PORT_BASE + proxy_port - CONSOLE_PROXY_BASE_PORT))
+        console_port=$((CONSOLE_PORT_BASE + index))
         cat >> "$HAPROXY_CFG" << HAPROXYCONSOLE
 
 backend console-proxy-${cname}-${console_port}
   mode tcp
   server ${cname}-console-proxy 127.0.0.1:${proxy_port} check
 HAPROXYCONSOLE
-    fi
-done
+    done
+fi
 
 echo "  HAProxy config written: $HAPROXY_CFG"
 
