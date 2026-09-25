@@ -2,8 +2,8 @@
 # =============================================================================
 # OCP Lab Portal — DNS (BIND) + HAProxy infrastructure setup
 #
-# One-time DNS/HAProxy setup for configured UPI slots. Console forwarding
-# also covers the fixed IPI slots, which use their own Ingress VIPs.
+# One-time DNS/HAProxy setup for configured UPI and fixed IPI slots. Console
+# forwarding covers both, with IPI routes resolving to their own Ingress VIPs.
 # After this runs once, no service restarts are needed when deploying
 # or deleting clusters — HAProxy health checks handle backend availability.
 #
@@ -244,6 +244,23 @@ _etcd-server-ssl._tcp.${cname}.${DOMAIN}.	86400 IN SRV 0 10 2380 etcd-2.${cname}
 EOF
 done
 
+for cname in "${IPI_CLUSTER_ORDER[@]}"; do
+    offset=${IPI_CLUSTERS[$cname]}
+    cat >> "$FORWARD_ZONE" << EOF
+;
+; IPI Cluster: ${cname} (offset ${offset})
+api.${cname}.${DOMAIN}.		IN	A	${SUBNET}.$((offset))
+api-int.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset))
+ingress.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 1))
+*.apps.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 1))
+master-0.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 2))
+master-1.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 3))
+master-2.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 4))
+worker-0.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 5))
+worker-1.${cname}.${DOMAIN}.	IN	A	${SUBNET}.$((offset + 6))
+EOF
+done
+
 echo ";EOF" >> "$FORWARD_ZONE"
 echo "  Forward zone written: $FORWARD_ZONE"
 
@@ -274,6 +291,21 @@ $((offset + 2))	IN	PTR	master-1.${cname}.${DOMAIN}.
 $((offset + 3))	IN	PTR	master-2.${cname}.${DOMAIN}.
 $((offset + 4))	IN	PTR	worker-0.${cname}.${DOMAIN}.
 $((offset + 5))	IN	PTR	worker-1.${cname}.${DOMAIN}.
+EOF
+done
+
+for cname in "${IPI_CLUSTER_ORDER[@]}"; do
+    offset=${IPI_CLUSTERS[$cname]}
+    cat >> "$REVERSE_ZONE" << EOF
+;
+; IPI Cluster: ${cname} (offset ${offset})
+$((offset))	IN	PTR	api.${cname}.${DOMAIN}.
+$((offset + 1))	IN	PTR	ingress.${cname}.${DOMAIN}.
+$((offset + 2))	IN	PTR	master-0.${cname}.${DOMAIN}.
+$((offset + 3))	IN	PTR	master-1.${cname}.${DOMAIN}.
+$((offset + 4))	IN	PTR	master-2.${cname}.${DOMAIN}.
+$((offset + 5))	IN	PTR	worker-0.${cname}.${DOMAIN}.
+$((offset + 6))	IN	PTR	worker-1.${cname}.${DOMAIN}.
 EOF
 done
 
@@ -771,6 +803,15 @@ for cname in "${CLUSTER_ORDER[@]}"; do
     echo "  api.${cname}.${DOMAIN} -> ${resolved} (expected ${BRIDGE_IP})"
     resolved=$(dig +short bootstrap.${cname}.${DOMAIN} @127.0.0.1 2>/dev/null || echo "FAILED")
     echo "  bootstrap.${cname}.${DOMAIN} -> ${resolved} (expected ${SUBNET}.$((offset)))"
+done
+for cname in "${IPI_CLUSTER_ORDER[@]}"; do
+    offset=${IPI_CLUSTERS[$cname]}
+    resolved=$(dig +short api.${cname}.${DOMAIN} @127.0.0.1 2>/dev/null || echo "FAILED")
+    echo "  api.${cname}.${DOMAIN} -> ${resolved} (expected ${SUBNET}.$((offset)))"
+    resolved=$(dig +short api-int.${cname}.${DOMAIN} @127.0.0.1 2>/dev/null || echo "FAILED")
+    echo "  api-int.${cname}.${DOMAIN} -> ${resolved} (expected ${SUBNET}.$((offset)))"
+    resolved=$(dig +short console-openshift-console.apps.${cname}.${DOMAIN} @127.0.0.1 2>/dev/null || echo "FAILED")
+    echo "  console-openshift-console.apps.${cname}.${DOMAIN} -> ${resolved} (expected ${SUBNET}.$((offset + 1)))"
 done
 
 echo ""
