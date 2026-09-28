@@ -171,6 +171,12 @@ Pre-configured slots with fixed DNS and HAProxy — no service restarts needed w
 
 All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes through HAProxy on `192.168.122.1`.
 
+The two `upi1` workers also receive a second virtio NIC from the dedicated
+libvirt `upi1-secondary` NAT network (`192.168.250.0/24`). Its fixed DHCP
+leases are `.114` and `.115` for worker-0 and worker-1 respectively. The
+network is created and marked for autostart by `cluster-infra-setup.sh`; new
+`upi1` deployments attach the same NICs automatically.
+
 ### IPI (Installer Provisioned Infrastructure — Baremetal)
 
 3 fixed DNS-backed slots, each with a 15-IP block. The user selects the slot from the portal; the request is queued if the slot or the shared IPI capacity is occupied.
@@ -363,6 +369,10 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
 | `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; UPI slots come first, followed by IPI slots |
 | `LABPORTAL_CONSOLE_BIND_IP` | `0.0.0.0` | Host address on which direct console listeners bind |
+| `LABPORTAL_UPI1_SECONDARY_NETWORK_NAME` | `upi1-secondary` | Dedicated libvirt network attached to the two `upi1` workers |
+| `LABPORTAL_UPI1_SECONDARY_SUBNET` | `192.168.250` | Secondary worker network /24 prefix |
+| `LABPORTAL_UPI1_SECONDARY_DHCP_START` | `192.168.250.100` | Secondary network DHCP range start |
+| `LABPORTAL_UPI1_SECONDARY_DHCP_END` | `192.168.250.200` | Secondary network DHCP range end |
 | `CLUSTERS_DIR` | `/kvm/clusters` | Directory where cluster artifacts are stored |
 | `PULL_SECRET_FILE` | `/root/pull-secret.txt` | Path to OpenShift pull secret |
 | `SSH_KEY_FILE` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |

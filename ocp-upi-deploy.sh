@@ -51,6 +51,16 @@ MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERS
 BRIDGE_IP="192.168.122.1"
 NETMASK="255.255.255.0"
 
+# upi1 workers also receive a second virtio NIC on a dedicated libvirt
+# network. cluster-infra-setup.sh creates the network and these fixed leases.
+UPI1_SECONDARY_NETWORK_NAME="${LABPORTAL_UPI1_SECONDARY_NETWORK_NAME:-upi1-secondary}"
+UPI1_SECONDARY_SUBNET="${LABPORTAL_UPI1_SECONDARY_SUBNET:-192.168.250}"
+UPI1_SECONDARY_GATEWAY="${UPI1_SECONDARY_SUBNET}.1"
+UPI1_SECONDARY_WORKER0_MAC="52:54:00:fa:11:14"
+UPI1_SECONDARY_WORKER1_MAC="52:54:00:fa:11:15"
+UPI1_SECONDARY_WORKER0_IP="${UPI1_SECONDARY_SUBNET}.114"
+UPI1_SECONDARY_WORKER1_IP="${UPI1_SECONDARY_SUBNET}.115"
+
 # For fixed UPI slots, enforce the correct offset regardless of args.
 # This prevents DHCP collisions when scripts are run manually with wrong offsets.
 declare -A _FIXED_SLOTS=([upi1]=110 [upi2]=131 [upi3]=151)
@@ -127,6 +137,18 @@ if ! virsh net-info default &>/dev/null; then
 elif [ "$(virsh net-info default 2>/dev/null | awk '/^Active:/{print $2}')" != "yes" ]; then
     echo "FAIL: libvirt 'default' network is not active. Run: virsh net-start default"
     preflight_ok=false
+fi
+
+if [ "$CLUSTER_NAME" = "upi1" ]; then
+    if ! virsh net-info "$UPI1_SECONDARY_NETWORK_NAME" &>/dev/null; then
+        echo "FAIL: libvirt '$UPI1_SECONDARY_NETWORK_NAME' network does not exist."
+        echo "      Run cluster-infra-setup.sh before deploying upi1."
+        preflight_ok=false
+    elif [ "$(virsh net-info "$UPI1_SECONDARY_NETWORK_NAME" 2>/dev/null | awk '/^Active:/{print $2}')" != "yes" ]; then
+        echo "FAIL: libvirt '$UPI1_SECONDARY_NETWORK_NAME' network is not active."
+        echo "      Run: virsh net-start $UPI1_SECONDARY_NETWORK_NAME"
+        preflight_ok=false
+    fi
 fi
 
 # RAM check — need at least 48 GB for the full cluster (5 nodes × 16 GB = 80 GB ideal, 48 GB minimum)
@@ -331,6 +353,21 @@ cp install-config.yaml_backup install-config.yaml
 deploy_node() {
     local name=$1; local ram=$2; local cpu=$3; local mac=$4; local role=$5; local ip=$6; local hostname=$7
     local NODE_ISO="$INSTALL_DIR/${name}.iso"
+    local secondary_mac=""
+    local secondary_ip=""
+
+    if [[ "$CLUSTER_NAME" == "upi1" && "$role" == "worker" ]]; then
+        case "$name" in
+            "${VM_PREFIX}-worker-0")
+                secondary_mac="$UPI1_SECONDARY_WORKER0_MAC"
+                secondary_ip="$UPI1_SECONDARY_WORKER0_IP"
+                ;;
+            "${VM_PREFIX}-worker-1")
+                secondary_mac="$UPI1_SECONDARY_WORKER1_MAC"
+                secondary_ip="$UPI1_SECONDARY_WORKER1_IP"
+                ;;
+        esac
+    fi
 
     # Add DHCP reservation in libvirt default network so the VM always
     # gets the correct IP, regardless of kernel args or NetworkManager state.
@@ -338,6 +375,17 @@ deploy_node() {
     virsh net-update default add ip-dhcp-host \
         "<host mac='$mac' name='$hostname' ip='$ip'/>" \
         --live --config 2>/dev/null || true
+
+    if [[ -n "$secondary_mac" ]]; then
+        echo "Adding secondary DHCP reservation: $secondary_mac -> $secondary_ip"
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" delete ip-dhcp-host \
+            "<host mac='${secondary_mac}'/>" --live 2>/dev/null || true
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" delete ip-dhcp-host \
+            "<host mac='${secondary_mac}'/>" --config 2>/dev/null || true
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" add ip-dhcp-host \
+            "<host mac='${secondary_mac}' name='${name}.secondary' ip='${secondary_ip}'/>" \
+            --live --config
+    fi
 
     echo "--- Creating Node-Specific ISO: $(basename "$NODE_ISO") ---"
 
@@ -363,12 +411,17 @@ deploy_node() {
     virsh destroy "$name" 2>/dev/null || true
     virsh undefine "$name" --remove-all-storage 2>/dev/null || true
 
+    local -a network_args=(--network "network=default,mac=$mac")
+    if [[ -n "$secondary_mac" ]]; then
+        network_args+=(--network "network=${UPI1_SECONDARY_NETWORK_NAME},mac=${secondary_mac}")
+    fi
+
     virt-install --name "$name" \
         --ram "$ram" \
         --vcpus "$cpu" \
         --cpu host-passthrough \
         --disk size=120,bus=virtio \
-        --network network=default,mac="$mac" \
+        "${network_args[@]}" \
         --graphics vnc,listen=127.0.0.1 \
         --video virtio \
         --cdrom "$NODE_ISO" \

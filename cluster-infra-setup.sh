@@ -55,6 +55,21 @@ CONSOLE_PORT_NUMBERS=()
 CONSOLE_PROXY_PORT_NUMBERS=()
 declare -A CONSOLE_PROXY_PORTS=()
 
+# Dedicated secondary network for the two upi1 worker nodes.  It is a
+# libvirt NAT network separate from the OpenShift default network so the
+# workers get a second virtio NIC without changing their primary cluster
+# addressing.  The fixed DHCP leases make the guest-side addresses stable.
+UPI1_SECONDARY_NETWORK_NAME="${LABPORTAL_UPI1_SECONDARY_NETWORK_NAME:-upi1-secondary}"
+UPI1_SECONDARY_SUBNET="${LABPORTAL_UPI1_SECONDARY_SUBNET:-192.168.250}"
+UPI1_SECONDARY_NETMASK="${LABPORTAL_UPI1_SECONDARY_NETMASK:-255.255.255.0}"
+UPI1_SECONDARY_GATEWAY="${UPI1_SECONDARY_SUBNET}.1"
+UPI1_SECONDARY_DHCP_START="${LABPORTAL_UPI1_SECONDARY_DHCP_START:-${UPI1_SECONDARY_SUBNET}.100}"
+UPI1_SECONDARY_DHCP_END="${LABPORTAL_UPI1_SECONDARY_DHCP_END:-${UPI1_SECONDARY_SUBNET}.200}"
+UPI1_SECONDARY_WORKERS=(
+    "worker-0|52:54:00:fa:11:14|${UPI1_SECONDARY_SUBNET}.114"
+    "worker-1|52:54:00:fa:11:15|${UPI1_SECONDARY_SUBNET}.115"
+)
+
 # Parse CLUSTER_SLOTS (format: "name1:offset1 name2:offset2 ...")
 # Fall back to defaults if not set
 CLUSTER_SLOTS="${CLUSTER_SLOTS:-upi1:110 upi2:131 upi3:151}"
@@ -80,6 +95,58 @@ for entry in $IPI_SLOTS; do
     IPI_CLUSTER_ORDER+=("$cname")
 done
 CONSOLE_CLUSTER_ORDER=("${CLUSTER_ORDER[@]}" "${IPI_CLUSTER_ORDER[@]}")
+
+ensure_upi1_secondary_network() {
+    local network_xml="/tmp/${UPI1_SECONDARY_NETWORK_NAME}.xml"
+    cat > "$network_xml" << NETWORK_XML
+<network>
+  <name>${UPI1_SECONDARY_NETWORK_NAME}</name>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='virbr1' stp='on' delay='0'/>
+  <ip address='${UPI1_SECONDARY_GATEWAY}' netmask='${UPI1_SECONDARY_NETMASK}'>
+    <dhcp>
+      <range start='${UPI1_SECONDARY_DHCP_START}' end='${UPI1_SECONDARY_DHCP_END}'/>
+    </dhcp>
+  </ip>
+</network>
+NETWORK_XML
+
+    if virsh net-info "$UPI1_SECONDARY_NETWORK_NAME" &>/dev/null; then
+        if ! virsh net-dumpxml "$UPI1_SECONDARY_NETWORK_NAME" | \
+            grep -q "${UPI1_SECONDARY_GATEWAY}"; then
+            echo "  FAIL: libvirt network '$UPI1_SECONDARY_NETWORK_NAME' exists with an unexpected subnet."
+            echo "  Expected ${UPI1_SECONDARY_GATEWAY}/${UPI1_SECONDARY_NETMASK}."
+            return 1
+        fi
+        echo "  Network '$UPI1_SECONDARY_NETWORK_NAME' already defined."
+    else
+        virsh net-define "$network_xml"
+        echo "  Defined network '$UPI1_SECONDARY_NETWORK_NAME'."
+    fi
+
+    if [ "$(virsh net-info "$UPI1_SECONDARY_NETWORK_NAME" | awk '/^Active:/{print $2}')" != "yes" ]; then
+        virsh net-start "$UPI1_SECONDARY_NETWORK_NAME"
+    fi
+    virsh net-autostart "$UPI1_SECONDARY_NETWORK_NAME" >/dev/null
+
+    for worker_entry in "${UPI1_SECONDARY_WORKERS[@]}"; do
+        IFS='|' read -r worker mac worker_ip <<< "$worker_entry"
+        hostname="${worker}.upi1-secondary.${DOMAIN}"
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" delete ip-dhcp-host \
+            "<host mac='${mac}'/>" --live 2>/dev/null || true
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" delete ip-dhcp-host \
+            "<host mac='${mac}'/>" --config 2>/dev/null || true
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" add ip-dhcp-host \
+            "<host mac='${mac}' name='${hostname}' ip='${worker_ip}'/>" --live
+        virsh net-update "$UPI1_SECONDARY_NETWORK_NAME" add ip-dhcp-host \
+            "<host mac='${mac}' name='${hostname}' ip='${worker_ip}'/>" --config
+        echo "  ${mac} -> ${worker_ip} (${hostname})"
+    done
+}
 
 FORWARD_ZONE="/var/named/forward.${DOMAIN}"
 REVERSE_ZONE="/var/named/reverse.${DOMAIN}"
@@ -744,6 +811,9 @@ fi
 # Configure static DHCP reservations for all fixed UPI slots.
 # MAC formula must match ocp-upi-deploy.sh: 52:54:00:<hex(offset)>:00:<node_suffix>
 echo ""
+echo "=== Configuring upi1 secondary worker network ==="
+ensure_upi1_secondary_network
+
 echo "=== Configuring DHCP reservations ==="
 if ! virsh net-info default &>/dev/null; then
     echo "  WARN: libvirt 'default' network not found — skipping DHCP setup"

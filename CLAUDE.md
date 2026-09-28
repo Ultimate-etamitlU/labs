@@ -36,7 +36,7 @@ labs/
 These rules are non-negotiable for anyone working on this codebase:
 
 1. **Shared infrastructure** — The lab host is multi-user. Never auto-destroy VMs without explicit confirmation. Other users may have active clusters.
-2. **Management network is off-limits** — Only operate within the libvirt default network (192.168.122.0/24) for cluster VMs. Never touch the host's management/primary network interface.
+2. **Management network is off-limits** — Cluster primary traffic uses the libvirt default network (192.168.122.0/24); the explicitly managed `upi1-secondary` network is the only additional cluster network. Never touch the host's management/primary network interface.
 3. **SELinux stays enforcing** — Never use `setenforce 0` or permissive mode. If SELinux blocks something, fix it properly (correct contexts, file ownership, include files).
 4. **Minimal firewall** — Default-deny. Only open ports that are actually needed, in the correct zone. Document any new firewall rules.
 5. **No real IPs/hostnames in code or docs** — Use `example.com` as domain, `lab.example.com` as hostname. The README already follows this convention.
