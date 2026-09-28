@@ -245,6 +245,33 @@ CLUSTER_IP_RANGES = {
     "sno2": ("192.168.200.20", "192.168.200.20"),
 }
 
+# Keep the lifecycle choices in one place so deployment and extension flows
+# present and validate the same options.
+CLUSTER_LIFETIME_OPTIONS = [
+    {"value": "3", "label": "3 hours"},
+    {"value": "4", "label": "4 hours"},
+    {"value": "8", "label": "8 hours"},
+    {"value": "24", "label": "1 day"},
+    {"value": "48", "label": "2 days"},
+    {"value": "72", "label": "3 days"},
+    {"value": "168", "label": "1 week"},
+    {"value": "extend", "label": "More than a week (needs approval)"},
+]
+CLUSTER_LIFETIME_HOURS = {
+    option["value"]: int(option["value"])
+    for option in CLUSTER_LIFETIME_OPTIONS
+    if option["value"].isdigit()
+}
+
+
+def parse_lifetime_selection(value):
+    """Return (hours, needs_admin_approval) for a lifecycle choice."""
+    if value == "extend":
+        return 168, True
+    if value not in CLUSTER_LIFETIME_HOURS:
+        raise ValueError
+    return CLUSTER_LIFETIME_HOURS[value], False
+
 _ACTIVE_DEPLOYMENT_SQL = sql_statuses(ACTIVE_DEPLOYMENT_STATUSES)
 _RUNNING_DEPLOYMENT_SQL = running_statuses_sql()
 _IPI_OCCUPIED_STATUSES = tuple(
@@ -524,6 +551,42 @@ def get_cluster_versions(clusters):
                 if version:
                     versions[name] = version
     return versions
+
+
+def _find_cluster_auth_file(cluster_name, filename):
+    """Find an auth artifact for the newest active cluster installation."""
+    if not valid_cluster_name(cluster_name):
+        return None
+
+    candidates = []
+    with get_db_ctx() as conn:
+        deployment = conn.execute(
+            f"SELECT cluster_name, ocp_version FROM deployments "
+            f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+            "LIMIT 1",
+            (cluster_name,),
+        ).fetchone()
+    if deployment:
+        active_path = os.path.join(
+            config.storage_dir(),
+            "clusters",
+            f"{deployment['cluster_name']}-{deployment['ocp_version']}",
+            "auth",
+            filename,
+        )
+        if os.path.isfile(active_path):
+            return active_path
+        candidates.append(active_path)
+
+    candidates.extend(
+        glob.glob(
+            os.path.join(
+                config.storage_dir(), "clusters", f"{cluster_name}-*", "auth", filename
+            )
+        )
+    )
+    existing = [path for path in candidates if os.path.isfile(path)]
+    return max(existing, key=os.path.getmtime) if existing else None
 
 
 def get_lab_status():
@@ -1662,6 +1725,7 @@ def user_dashboard():
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
                            available_slots=available_slots,
+                           lifetime_options=CLUSTER_LIFETIME_OPTIONS,
                            install_types={
                                name: install_type
                                for name, install_type in config.INSTALL_TYPES.items()
@@ -1733,6 +1797,92 @@ def activate_console():
     )
 
 
+@app.route("/cluster/extend", methods=["POST"])
+@login_required
+def extend_cluster_lifecycle():
+    """Extend an active cluster by a self-service lifecycle option."""
+    cluster_name = request.form.get("cluster_name", "").strip()
+    lifetime_raw = request.form.get("extension_hours", "").strip()
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    try:
+        extension_hours, needs_approval = parse_lifetime_selection(lifetime_raw)
+    except ValueError:
+        flash("Choose a valid cluster lifetime.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    _, clusters, _ = get_lab_status()
+    try:
+        with get_db_ctx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deployment = conn.execute(
+                f"SELECT started_by, install_type FROM deployments "
+                f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+                "ORDER BY id DESC LIMIT 1",
+                (cluster_name,),
+            ).fetchone()
+            reservation = conn.execute(
+                "SELECT reserved_until, reserved_by FROM cluster_reservations "
+                "WHERE cluster_name=? AND reserved_until >= datetime('now')",
+                (cluster_name,),
+            ).fetchone()
+
+            is_remote = deployment and deployment["install_type"] == "sno"
+            if not deployment or (cluster_name not in clusters and not is_remote) or not reservation:
+                conn.rollback()
+                flash(f"Cluster '{cluster_name}' is not active.", "warning")
+                return redirect(url_for("user_dashboard"))
+
+            owner = reservation["reserved_by"] or deployment["started_by"]
+            if not session.get("admin") and owner != session.get("user_email"):
+                conn.rollback()
+                flash("You can only extend clusters you created.", "danger")
+                return redirect(url_for("user_dashboard"))
+
+            if needs_approval:
+                pending = conn.execute(
+                    "SELECT id FROM cluster_extension_requests "
+                    "WHERE cluster_name=? AND status='pending' LIMIT 1",
+                    (cluster_name,),
+                ).fetchone()
+                if pending:
+                    conn.rollback()
+                    flash("An extension request for this cluster is already pending admin approval.", "warning")
+                    return redirect(url_for("user_dashboard"))
+                conn.execute(
+                    "INSERT INTO cluster_extension_requests (cluster_name, requested_by, reason) "
+                    "VALUES (?, ?, ?)",
+                    (cluster_name, session.get("user_email"), "More than a week requested from dashboard"),
+                )
+                conn.commit()
+            else:
+                updated = conn.execute(
+                    "UPDATE cluster_reservations SET reserved_until="
+                    "datetime(reserved_until, '+' || ? || ' hours') "
+                    "WHERE cluster_name=? AND reserved_until >= datetime('now')",
+                    (str(extension_hours), cluster_name),
+                )
+                if updated.rowcount != 1:
+                    conn.rollback()
+                    flash(f"Cluster '{cluster_name}' lifetime has expired.", "warning")
+                    return redirect(url_for("user_dashboard"))
+                conn.commit()
+    except sqlite3.Error:
+        app.logger.exception("Failed to extend lifecycle for %s", cluster_name)
+        flash("Could not update the cluster lifetime. Please try again.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    if needs_approval:
+        log_activity("extension_requested", f"{cluster_name} more than a week")
+        flash(f"Extension request for '{cluster_name}' was sent to an administrator.", "success")
+    else:
+        _write_reservation_file()
+        log_activity("cluster_lifecycle_extended", f"{cluster_name} +{extension_hours}h")
+        flash(f"Extended '{cluster_name}' by {extension_hours} hours.", "success")
+    return redirect(url_for("user_dashboard"))
+
+
 # --- Cluster Management ---
 
 @app.route("/cluster/kubeconfig/<cluster_name>")
@@ -1758,6 +1908,37 @@ def cluster_kubeconfig(cluster_name):
         return redirect(url_for("user_dashboard"))
     return send_file(kubeconfig_path, as_attachment=True,
                      download_name=f"kubeconfig-{cluster_name}")
+
+
+@app.route("/cluster/credentials/<cluster_name>")
+@login_required
+def cluster_credentials(cluster_name):
+    """Return the kubeadmin console credentials for an active cluster."""
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    _, clusters, _ = get_lab_status()
+    if cluster_name not in clusters:
+        return jsonify(error="Cluster is not active"), 404
+
+    password_path = _find_cluster_auth_file(cluster_name, "kubeadmin-password")
+    if not password_path:
+        return jsonify(error="Cluster credentials are not available yet"), 404
+
+    try:
+        with open(password_path, "r", encoding="utf-8") as password_file:
+            password = password_file.read().strip()
+    except OSError:
+        return jsonify(error="Cluster credentials could not be read"), 503
+
+    if not password:
+        return jsonify(error="Cluster credentials are not available yet"), 404
+
+    log_activity("console_credentials_view", cluster_name)
+    response = jsonify(username="kubeadmin", password=password)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.route("/cluster/create", methods=["POST"])
@@ -1786,17 +1967,11 @@ def cluster_create():
         flash(f"{release['label']} is pinned to OCP {release['version']}.", "danger")
         return redirect(url_for("user_dashboard"))
 
-    needs_extension = reservation_hours_raw == "extend"
-    if needs_extension:
-        reservation_hours = 168
-    else:
-        try:
-            reservation_hours = int(reservation_hours_raw)
-            if reservation_hours < 3 or reservation_hours > 168:
-                raise ValueError
-        except (ValueError, TypeError):
-            flash("Cluster lifetime is required (3 hours to 1 week).", "danger")
-            return redirect(url_for("user_dashboard"))
+    try:
+        reservation_hours, needs_extension = parse_lifetime_selection(reservation_hours_raw)
+    except ValueError:
+        flash("Cluster lifetime is required (3 hours to 1 week).", "danger")
+        return redirect(url_for("user_dashboard"))
 
     if install_type not in config.INSTALL_TYPES:
         flash(f"Invalid install type '{install_type}'.", "danger")
