@@ -67,29 +67,42 @@ def ensure_schema(conn):
     )
 
 
-def claim_job(conn, job_id, worker_id):
+def claim_job(conn, job_id, worker_id, capacity=None):
     """Atomically move one queued job to ``starting`` and return its row.
 
-    The lab has one shared installation environment, so the same transaction
-    also rejects a claim while another installer is already starting or
-    deploying.  Keeping this check inside ``BEGIN IMMEDIATE`` makes the guard
-    effective across multiple portal workers and after a portal restart.
+    Installation jobs are independent once they have passed admission, so
+    this transaction deliberately does not impose a global one-installer
+    lock.  ``capacity`` may be ``(vcpus, ram_gb)``; when supplied, the check
+    is repeated inside the transaction so two portal workers cannot both
+    admit jobs beyond the durable resource budget.
 
-    ``None`` means another worker changed the job, or the global installation
-    guard is currently occupied.
+    ``None`` means another worker changed the job or the resource budget is
+    currently occupied.
     """
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        running = conn.execute(
-            "SELECT 1 FROM deployments "
-            f"WHERE status IN ({running_statuses_sql()}) AND id != ? LIMIT 1",
-            (job_id,),
-        ).fetchone()
-        if running:
-            conn.rollback()
-            return None
+        if capacity is not None:
+            max_vcpus, max_ram_gb = capacity
+            candidate = conn.execute(
+                "SELECT resource_vcpus, resource_ram_gb FROM deployments "
+                "WHERE id=? AND status=?",
+                (job_id, QUEUED_STATUS),
+            ).fetchone()
+            if not candidate:
+                conn.rollback()
+                return None
+            active = conn.execute(
+                "SELECT COALESCE(SUM(resource_vcpus), 0), "
+                "COALESCE(SUM(resource_ram_gb), 0) FROM deployments "
+                f"WHERE status IN ({running_statuses_sql()})"
+            ).fetchone()
+            total_vcpus = int(active[0] or 0) + int(candidate[0] or 0)
+            total_ram_gb = int(active[1] or 0) + int(candidate[1] or 0)
+            if total_vcpus > int(max_vcpus) or total_ram_gb > int(max_ram_gb):
+                conn.rollback()
+                return None
         cursor = conn.execute(
             "UPDATE deployments "
             "SET status=?, claimed_at=CURRENT_TIMESTAMP, heartbeat_at=CURRENT_TIMESTAMP, "

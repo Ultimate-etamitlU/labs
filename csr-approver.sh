@@ -35,19 +35,30 @@ if [ -z "$KC" ]; then
 fi
 
 export KUBECONFIG="$KC"
+# Use the client matching this cluster when multiple UPI installations with
+# different OCP versions are running concurrently.  Fall back to the host
+# client for legacy/manual installations that predate version-scoped tools.
+KC_DIR=$(dirname "$(dirname "$KC")")
+KC_DIR_NAME=$(basename "$KC_DIR")
+KC_VERSION="${KC_DIR_NAME#${CLUSTER_NAME}-}"
+OC_BIN="/kvm/client_tools/${KC_VERSION}/bin/oc"
+if [ ! -x "$OC_BIN" ]; then
+    OC_BIN="oc"
+fi
 echo "[csr-approver] Cluster: ${CLUSTER_NAME}"
 echo "[csr-approver] KUBECONFIG: ${KC}"
+echo "[csr-approver] Client: ${OC_BIN}"
 echo "[csr-approver] Check interval: ${CHECK_INTERVAL}s, max runtime: ${MAX_RUNTIME}s"
 
 approve_pending_csrs() {
     local pending
-    pending=$(oc get csr -o go-template='{{range .items}}{{if not .status.certificate}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
+    pending=$("$OC_BIN" get csr -o go-template='{{range .items}}{{if not .status.certificate}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
     if [ -n "$pending" ]; then
         local count
         count=$(echo "$pending" | wc -l)
         echo "[csr-approver] Approving ${count} pending CSR(s)..."
         echo "$pending" | while read -r csr; do
-            oc adm certificate approve "$csr" 2>/dev/null && \
+            "$OC_BIN" adm certificate approve "$csr" 2>/dev/null && \
                 echo "[csr-approver]   Approved: $csr" || true
         done
     fi
@@ -56,12 +67,12 @@ approve_pending_csrs() {
 is_cluster_ready() {
     # Check if all ClusterOperators are Available=True and not Progressing/Degraded
     local total avail
-    total=$(oc get co --no-headers 2>/dev/null | wc -l)
+    total=$("$OC_BIN" get co --no-headers 2>/dev/null | wc -l)
     [ "$total" -eq 0 ] && return 1
 
-    avail=$(oc get co -o go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Available"}}{{if eq .status "True"}}1{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | tr -d '[:space:]' | wc -c)
+    avail=$("$OC_BIN" get co -o go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Available"}}{{if eq .status "True"}}1{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | tr -d '[:space:]' | wc -c)
 
-    progressing=$(oc get co -o go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Progressing"}}{{if eq .status "True"}}1{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | tr -d '[:space:]' | wc -c)
+    progressing=$("$OC_BIN" get co -o go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Progressing"}}{{if eq .status "True"}}1{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | tr -d '[:space:]' | wc -c)
 
     if [ "$avail" -ge "$total" ] && [ "$progressing" -eq 0 ]; then
         return 0

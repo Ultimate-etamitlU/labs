@@ -9,6 +9,12 @@
 MOTD_FILE="/etc/motd"
 RESERVATION_FILE="/var/run/cluster-reservations.json"
 
+# UPI and IPI installers can finish at the same time.  Serialize the final
+# write so one MOTD generation cannot truncate another one's output.
+MOTD_LOCK_FILE="/tmp/ocp-lab-motd.lock"
+exec 9>"$MOTD_LOCK_FILE"
+flock -x 9
+
 # Source site config for domain
 if [ -f /etc/ocp-lab.conf ]; then
     # shellcheck source=/dev/null
@@ -17,6 +23,19 @@ fi
 BASE_DOMAIN="${BASE_DOMAIN:-example.com}"
 STORAGE_DIR="${STORAGE_DIR:-/kvm}"
 CLUSTERS_DIR="$STORAGE_DIR/clusters"
+
+oc_for_cluster() {
+    local cluster_dir="$1"
+    local entry version candidate
+    entry=$(basename "$cluster_dir")
+    version="${entry#*-}"
+    candidate="$STORAGE_DIR/client_tools/$version/bin/oc"
+    if [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+    else
+        printf '%s\n' "oc"
+    fi
+}
 
 # Collect active clusters by checking for kubeconfig files
 declare -a ACTIVE_CLUSTERS=()
@@ -61,18 +80,19 @@ fi
             password=$(cat "$dir/auth/kubeadmin-password" 2>/dev/null || echo "N/A")
             console="console-openshift-console.apps.${cluster_name}.${BASE_DOMAIN}"
             vm_count=$(virsh list --name 2>/dev/null | grep -cE "(vm-)?${cluster_name}-" || true)
+            oc_bin=$(oc_for_cluster "$dir")
 
             # Query live cluster version and status (5s timeout to avoid blocking SSH login)
             api_status="Unknown"
-            cv_out=$(timeout 5 env KUBECONFIG="$kubeconfig" oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null)
+            cv_out=$(timeout 5 env KUBECONFIG="$kubeconfig" "$oc_bin" get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null)
             if [ -n "$cv_out" ]; then
                 version="$cv_out"
-                if timeout 5 env KUBECONFIG="$kubeconfig" oc get clusterversion 2>/dev/null | grep -q "True"; then
+                if timeout 5 env KUBECONFIG="$kubeconfig" "$oc_bin" get clusterversion 2>/dev/null | grep -q "True"; then
                     api_status="Ready"
                 else
                     api_status="Installing"
                 fi
-            elif timeout 5 env KUBECONFIG="$kubeconfig" oc get nodes &>/dev/null; then
+            elif timeout 5 env KUBECONFIG="$kubeconfig" "$oc_bin" get nodes &>/dev/null; then
                 api_status="Installing"
             else
                 api_status="Bootstrapping"

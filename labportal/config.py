@@ -30,15 +30,19 @@ INSTALL_TYPES = {
     "upi": {
         "label": "UPI (User Provisioned)",
         "script": os.environ.get("LABPORTAL_UPI_SCRIPT", "/root/labs/ocp-upi-deploy.sh"),
-        "vcpus": 16,    # 3×4 masters + 2×2 workers
-        "ram_gb": 80,    # 5×16G
+        # Peak install footprint includes the temporary 4-vCPU/16G bootstrap:
+        # 4 + (3×4) + (2×2) vCPUs and 16 + (3×16) + (2×8)G RAM.
+        "vcpus": 20,
+        "ram_gb": 80,
         "requires_slot": True,
     },
     "ipi": {
         "label": "IPI (Installer Provisioned)",
         "script": os.environ.get("LABPORTAL_IPI_SCRIPT", "/root/labs/ocp-ipi-deploy.sh"),
-        "vcpus": 32,    # 3×8 masters + 2×4 workers
-        "ram_gb": 128,   # 3×32G + 2×16G
+        # IPI has the same documented node minimums; include its temporary
+        # bootstrap VM in the peak resource reservation.
+        "vcpus": 20,
+        "ram_gb": 80,
         "requires_slot": False,
         "requires_ipi_slot": True,
     },
@@ -52,15 +56,19 @@ INSTALL_TYPES = {
     },
 }
 
-# Release presets shown in the deployment form.  OCP 5.0.0-rc.2 is pinned
-# because this is the temporary EC2 release being exposed on the lab host.
+# Release presets shown in the deployment form.  Keep both OCP 5.0 release
+# candidates available because they may exercise different behaviors.
 OCP_RELEASES = {
     "ocp4": {
         "label": "OpenShift 4.x",
         "version": "",
     },
     "ocp5-ec2": {
-        "label": "OpenShift 5.0 - EC2",
+        "label": "OpenShift 5.0 - EC2 (RC4)",
+        "version": "5.0.0-rc.4",
+    },
+    "ocp5-ec2-rc2": {
+        "label": "OpenShift 5.0 - EC2 (RC2)",
         "version": "5.0.0-rc.2",
     },
 }
@@ -110,8 +118,37 @@ IPI_SLOTS = {
     "ipi3": 230,
 }
 
+# Each IPI slot owns a provisioning L2 network.  The bridge/IP values are
+# deliberately outside the cluster data network and the legacy shared
+# ``provisioning`` network so an installer bootstrap can run independently.
+IPI_PROVISIONING_NETWORKS = {
+    "ipi1": {
+        "network": "provisioning-ipi1",
+        "bridge": "prov-ipi1",
+        "cidr": "192.168.10.0/24",
+        "gateway": "192.168.10.1",
+    },
+    "ipi2": {
+        "network": "provisioning-ipi2",
+        "bridge": "prov-ipi2",
+        "cidr": "192.168.11.0/24",
+        "gateway": "192.168.11.1",
+    },
+    "ipi3": {
+        "network": "provisioning-ipi3",
+        "bridge": "prov-ipi3",
+        "cidr": "192.168.12.0/24",
+        "gateway": "192.168.12.1",
+    },
+}
+
 def ipi_slots():
     return IPI_SLOTS
+
+
+def ipi_provisioning_networks():
+    """Return the slot-scoped IPI provisioning network definitions."""
+    return IPI_PROVISIONING_NETWORKS
 
 
 # ---------------------------------------------------------------------------
