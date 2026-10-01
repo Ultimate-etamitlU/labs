@@ -200,14 +200,9 @@
                 </label>
                 <div class="pf-v5-c-form__group-control">
                     <select class="pf-v5-c-form-control" id="reservation_hours" name="reservation_hours" required>
-                        <option value="3">3 hours</option>
-                        <option value="4">4 hours</option>
-                        <option value="8" selected>8 hours</option>
-                        <option value="24">1 day</option>
-                        <option value="48">2 days</option>
-                        <option value="72">3 days</option>
-                        <option value="168">1 week</option>
-                        <option value="extend">More than a week (needs approval)</option>
+                        {% for option in lifetime_options %}
+                        <option value="{{ option.value }}"{% if option.value == '8' %} selected{% endif %}>{{ option.label }}</option>
+                        {% endfor %}
                     </select>
                 </div>
             </div>
@@ -335,6 +330,12 @@
                         <a href="{{ url_for('cluster_logs', cluster_name=cluster_name) }}" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;">
                             View Logs
                         </a>
+                        {% if res and (session.get('admin') or res.get('reserved_by') == session.get('user_email') or info.get('started_by') == session.get('user_email') or not info.get('started_by')) %}
+                        <button type="button" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size: 0.75rem; padding: 0.2rem 0.6rem;"
+                                onclick="showLifecycleModal('{{ cluster_name }}', '{{ res.reserved_until }}')">
+                            Extend Lifecycle
+                        </button>
+                        {% endif %}
                         {% if session.get('admin') or info.get('started_by') == session.get('user_email') or not info.get('started_by') %}
                         <form method="post" action="{{ url_for('cluster_delete') }}"
                               onsubmit="return confirm('Delete cluster {{ cluster_name }}? This will destroy all {{ cluster_vms|length }} VMs and their storage.');">
@@ -414,7 +415,23 @@
         </div>
 
         <div style="margin-bottom:1rem; border-top:1px solid #3c3f42; padding-top:1rem;">
-            <h3 style="font-size:0.9rem; margin-bottom:0.4rem; color:#8a8d90;">Access from your local system</h3>
+            <h3 style="font-size:0.9rem; margin-bottom:0.4rem; color:#8a8d90;">4. OpenShift console credentials</h3>
+            <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.45rem;">
+                <span style="font-size:0.82rem; color:#8a8d90; min-width:4.5rem;">Username</span>
+                <code id="cli-modal-credentials-user" class="code-block" style="padding:0.35rem 0.5rem;">kubeadmin</code>
+                <button onclick="copyText('cli-modal-credentials-user', this)" class="copy-btn" title="Copy username">&#x2398;</button>
+            </div>
+            <div id="cli-modal-credentials-password-row" style="display:none; align-items:center; gap:0.5rem; margin-bottom:0.45rem;">
+                <span style="font-size:0.82rem; color:#8a8d90; min-width:4.5rem;">Password</span>
+                <code id="cli-modal-credentials-password" class="code-block" style="padding:0.35rem 0.5rem; word-break:break-all;"></code>
+                <button id="cli-modal-credentials-copy" onclick="copyText('cli-modal-credentials-password', this)" class="copy-btn" title="Copy password">&#x2398;</button>
+            </div>
+            <button id="cli-modal-credentials-show" type="button" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem; padding:0.3rem 0.8rem;" onclick="loadClusterCredentials()">Show Credentials</button>
+            <p id="cli-modal-credentials-help" style="font-size:0.82rem; color:#8a8d90; margin-top:0.5rem;">The kubeadmin password is loaded only when requested.</p>
+        </div>
+
+        <div style="margin-bottom:1rem; border-top:1px solid #3c3f42; padding-top:1rem;">
+            <h3 style="font-size:0.9rem; margin-bottom:0.4rem; color:#8a8d90;">5. Access from your local system</h3>
             <p style="font-size:0.82rem; color:#8a8d90; margin-bottom:0.5rem;">Download the kubeconfig to use <code>oc</code> / <code>kubectl</code> from your own machine:</p>
             <div style="display:flex; gap:0.5rem; align-items:center; margin-bottom:0.5rem;">
                 <a id="cli-modal-download" href="#" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem; padding:0.3rem 0.8rem;">Download kubeconfig</a>
@@ -438,6 +455,41 @@
     </div>
 </div>
 
+<!-- Lifecycle Extension Modal -->
+<div id="lifecycle-modal-backdrop" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; justify-content:center; align-items:center;"
+     onclick="if(event.target===this) closeLifecycleModal()">
+    <div style="background:#212427; border:1px solid #3c3f42; border-radius:8px; width:460px; max-width:90vw; padding:1.5rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h2 style="margin:0; font-size:1.1rem; color:#f0f0f0;" id="lifecycle-modal-title">Extend Lifecycle</h2>
+            <button type="button" onclick="closeLifecycleModal()" style="background:none; border:none; color:#c7c7c7; font-size:1.5rem; cursor:pointer; padding:0 0.25rem;">&times;</button>
+        </div>
+        <form method="post" action="{{ url_for('extend_cluster_lifecycle') }}" id="lifecycle-form">
+            <input type="hidden" name="cluster_name" id="lifecycle-cluster-name">
+            <p style="font-size:0.85rem; color:#c7c7c7; margin-bottom:0.75rem;">
+                Choose the additional lifetime for this cluster.
+            </p>
+            <p style="font-size:0.82rem; color:#8a8d90; margin-bottom:1rem;">
+                Current expiry: <strong id="lifecycle-current-expiry" style="color:#c7c7c7;"></strong>
+            </p>
+            <label class="pf-v5-c-form__label" for="lifecycle-extension-hours">
+                <span class="pf-v5-c-form__label-text">Extend by</span>
+            </label>
+            <select class="pf-v5-c-form-control" id="lifecycle-extension-hours" name="extension_hours" required style="margin-top:0.35rem;">
+                {% for option in lifetime_options %}
+                <option value="{{ option.value }}">{{ option.label }}</option>
+                {% endfor %}
+            </select>
+            <p style="font-size:0.8rem; color:#8a8d90; margin-top:0.6rem;">
+                “More than a week” sends an approval request to an administrator.
+            </p>
+            <div style="display:flex; justify-content:flex-end; gap:0.6rem; margin-top:1.25rem;">
+                <button type="button" class="pf-v5-c-button pf-m-secondary" onclick="closeLifecycleModal()">Cancel</button>
+                <button type="submit" class="pf-v5-c-button pf-m-primary">Extend Lifecycle</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 
 <script>
 var SSH_USER = "{{ ssh_user }}";
@@ -448,6 +500,8 @@ var IS_ADMIN = {{ 'true' if session.get('admin') else 'false' }};
 var CONSOLE_URLS = {{ console_urls|tojson }};
 var CONSOLE_ACTIVATIONS = {{ console_activations|tojson }};
 var ACTIVATE_CONSOLE_URL = "{{ url_for('activate_console') }}";
+var CLUSTER_CREDENTIALS_URL = "{{ url_for('cluster_credentials', cluster_name='__CLUSTER__') }}";
+var CURRENT_CREDENTIAL_CLUSTER = "";
 
 function toggleOcpRelease() {
     var sel = document.getElementById('ocp_release');
@@ -580,6 +634,7 @@ function activateConsole(clusterName, sourceButton) {
 }
 
 function showCliModal(clusterName, version) {
+    CURRENT_CREDENTIAL_CLUSTER = clusterName;
     document.getElementById('cli-modal-title').textContent = 'CLI Access — ' + clusterName;
     var dirName = version ? (clusterName + '-' + version) : (clusterName + '-*');
     document.getElementById('cli-modal-kubeconfig').textContent =
@@ -610,6 +665,14 @@ function showCliModal(clusterName, version) {
         consoleLink.style.display = 'none';
         consoleHelp.textContent = 'Direct BigB forwarding is not configured for this cluster.';
     }
+    document.getElementById('cli-modal-credentials-user').textContent = 'kubeadmin';
+    document.getElementById('cli-modal-credentials-password').textContent = '';
+    document.getElementById('cli-modal-credentials-password-row').style.display = 'none';
+    document.getElementById('cli-modal-credentials-show').style.display = 'inline-flex';
+    document.getElementById('cli-modal-credentials-show').disabled = false;
+    document.getElementById('cli-modal-credentials-show').textContent = 'Show Credentials';
+    document.getElementById('cli-modal-credentials-help').textContent =
+        'The kubeadmin password is loaded only when requested.';
     var downloadUrl = '/labs/cluster/kubeconfig/' + clusterName;
     document.getElementById('cli-modal-download').href = downloadUrl;
     document.getElementById('cli-modal-scp').textContent =
@@ -619,8 +682,51 @@ function showCliModal(clusterName, version) {
     document.getElementById('cli-modal-backdrop').style.display = 'flex';
 }
 
+function loadClusterCredentials() {
+    var button = document.getElementById('cli-modal-credentials-show');
+    var help = document.getElementById('cli-modal-credentials-help');
+    if (!CURRENT_CREDENTIAL_CLUSTER) return;
+    button.disabled = true;
+    button.textContent = 'Loading...';
+    fetch(CLUSTER_CREDENTIALS_URL.replace('__CLUSTER__', encodeURIComponent(CURRENT_CREDENTIAL_CLUSTER)), {
+        credentials: 'same-origin',
+        cache: 'no-store'
+    }).then(function(response) {
+        return response.json().then(function(data) {
+            if (!response.ok) throw new Error(data.error || 'Unable to load cluster credentials');
+            return data;
+        });
+    }).then(function(data) {
+        document.getElementById('cli-modal-credentials-user').textContent = data.username || 'kubeadmin';
+        document.getElementById('cli-modal-credentials-password').textContent = data.password || '';
+        document.getElementById('cli-modal-credentials-password-row').style.display = 'flex';
+        button.style.display = 'none';
+        help.textContent = 'Use these credentials on the OpenShift console. Do not share the password.';
+    }).catch(function(error) {
+        button.disabled = false;
+        button.textContent = 'Show Credentials';
+        help.textContent = error.message;
+    });
+}
+
 function closeCliModal() {
     document.getElementById('cli-modal-backdrop').style.display = 'none';
+    document.getElementById('cli-modal-credentials-password').textContent = '';
+    document.getElementById('cli-modal-credentials-password-row').style.display = 'none';
+    CURRENT_CREDENTIAL_CLUSTER = '';
+}
+
+function showLifecycleModal(clusterName, reservedUntil) {
+    document.getElementById('lifecycle-modal-title').textContent = 'Extend Lifecycle — ' + clusterName;
+    document.getElementById('lifecycle-cluster-name').value = clusterName;
+    document.getElementById('lifecycle-current-expiry').textContent = reservedUntil + ' UTC';
+    document.getElementById('lifecycle-extension-hours').value = '8';
+    document.getElementById('lifecycle-modal-backdrop').style.display = 'flex';
+}
+
+function closeLifecycleModal() {
+    document.getElementById('lifecycle-modal-backdrop').style.display = 'none';
+    document.getElementById('lifecycle-cluster-name').value = '';
 }
 
 
@@ -644,7 +750,7 @@ setInterval(updateCountdowns, 30000);
 
 
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') { closeCliModal(); }
+    if (e.key === 'Escape') { closeCliModal(); closeLifecycleModal(); }
 });
 
 (function() {
@@ -758,6 +864,10 @@ document.addEventListener('keydown', function(e) {
                     html += '<a href="/labs/user/terminal?cluster=' + name + '" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" title="Open terminal with KUBECONFIG set">&#x25B6; Terminal</a>';
                     html += '<button type="button" class="pf-v5-c-button pf-m-tertiary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showCliModal(\'' + name + '\', \'' + ver + '\')">CLI Access</button>';
                     html += '<a href="/labs/cluster/logs/' + name + '" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;">View Logs</a>';
+                    const canExtend = IS_ADMIN || (rv && rv.reserved_by === CURRENT_USER) || info.started_by === CURRENT_USER || !info.started_by;
+                    if (rv && canExtend) {
+                        html += '<button type="button" class="pf-v5-c-button pf-m-secondary pf-m-small" style="font-size:0.75rem;padding:0.2rem 0.6rem;" onclick="showLifecycleModal(\'' + name + '\', \'' + rv.reserved_until + '\')">Extend Lifecycle</button>';
+                    }
                     if (IS_ADMIN || info.started_by === CURRENT_USER || !info.started_by) {
                     html += '<form method="post" action="/labs/cluster/delete" onsubmit="return confirm(\'Delete cluster ' + name + '?\');">';
                     html += '<input type="hidden" name="cluster_name" value="' + name + '">';

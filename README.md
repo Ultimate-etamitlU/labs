@@ -149,13 +149,31 @@ Every cluster has a mandatory **lifetime** set at deploy time. When the lifetime
 
 ## Installation Methods
 
-All clusters use **OVNKubernetes** as the network plugin. Resource availability (CPU, RAM) is checked before each deployment. Requests that can fit on the host are retained in the durable deployment queue when the host or another installation is busy.
+All clusters use **OVNKubernetes** as the network plugin. Resource availability
+(CPU and RAM) is checked before each deployment. Requests that fit the host's
+resource budget are retained in the durable deployment queue when capacity is
+temporarily unavailable.
 
 ### Deployment admission and queue
 
-The portal admits only one installer process at a time across UPI, IPI, and SNO. This protects the shared host from overlapping bootstrap activity while preserving requests instead of rejecting them. The scheduler claims queued work transactionally, so a portal restart or a second portal worker cannot start two installers concurrently. Requests are handled FIFO; a head request that is waiting for capacity keeps later requests behind it.
+UPI installations may run concurrently when their peak reservations fit the
+host resource budget. The scheduler claims queued work transactionally, and
+the resource check is repeated inside the SQLite claim, so a portal restart or
+a second portal worker cannot over-admit CPU/RAM. A request waiting for
+capacity does not block an independent request that fits.
 
-The queue is visible only while a request is queued or an installer is running. Each queued request shows its position and the reason it is waiting. When the active IPI reservation has a valid expiry, the portal shows a conservative start estimate that includes a cleanup buffer; otherwise it reports that the ETA is unavailable and provides a **Request admin review** action. The action sends an auditable message to the portal admin and never bypasses the queue or releases a cluster.
+IPI slots use isolated provisioning networks (described below), so IPI
+installations can also run concurrently after the isolation change is active.
+For a short migration window, set `LABPORTAL_IPI_SERIALIZED=true`; that switch
+only waits while another IPI bootstrap VM is actually running. A completed
+cluster reservation never blocks a new IPI install. Resource limits still
+apply in every mode.
+
+The queue is visible only while a request is queued or an installer is running.
+Each queued request shows its position and the reason it is waiting. During
+the migration-only serialized mode, the portal can show a conservative IPI
+estimate based on the active bootstrap's reservation; this is not used by the
+normal isolated/parallel mode.
 
 New SNO deployments are temporarily paused by default. Set `LABPORTAL_ALLOW_SNO=true` to allow new SNO deployments on peer or boss machines. This setting does not affect existing SNO clusters, their access, or their cleanup.
 
@@ -165,15 +183,17 @@ Pre-configured slots with fixed DNS and HAProxy — no service restarts needed w
 
 | Slot | Allocated Range | Node IPs | Bootstrap | Masters | Workers | Resources |
 |------|----------------|----------|-----------|---------|---------|-----------|
-| `upi1` | `.110 – .130` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | 16 vCPUs, 80G RAM |
-| `upi2` | `.131 – .150` | `.131 – .137` | `.131` | `.132 – .134` | `.135 – .137` | 16 vCPUs, 80G RAM |
-| `upi3` | `.151 – .170` | `.151 – .156` | `.151` | `.152 – .154` | `.155 – .156` | 16 vCPUs, 80G RAM |
+| `upi1` | `.110 – .130` | `.110 – .115` | `.110` | `.111 – .113` | `.114 – .115` | 20 vCPUs, 80G RAM peak |
+| `upi2` | `.131 – .150` | `.131 – .137` | `.131` | `.132 – .134` | `.135 – .137` | 20 vCPUs, 80G RAM peak |
+| `upi3` | `.151 – .170` | `.151 – .156` | `.151` | `.152 – .154` | `.155 – .156` | 20 vCPUs, 80G RAM peak |
 
 All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes through HAProxy on `192.168.122.1`.
 
 ### IPI (Installer Provisioned Infrastructure — Baremetal)
 
-3 fixed DNS-backed slots, each with a 15-IP block. The user selects the slot from the portal; the request is queued if the slot or the shared IPI capacity is occupied.
+3 fixed DNS-backed slots, each with a 15-IP block. The user selects the slot
+from the portal; the request is queued if the slot is occupied or the host's
+resource budget is full.
 
 | Slot | Range | API VIP | Ingress VIP | Masters | Workers | Spare |
 |------|-------|---------|-------------|---------|---------|-------|
@@ -181,17 +201,29 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 | `ipi2` | `.215–.229` | `.215` | `.216` | `.217–.219` | `.220–.224` | `.225–.229` |
 | `ipi3` | `.230–.244` | `.230` | `.231` | `.232–.234` | `.235–.239` | `.240–.244` |
 
-`.245–.254` reserved as buffer. Cluster service and node IPs are on `192.168.122.0/24`; IPI provisioning traffic uses the separate `provisioning` network described below.
+The spare addresses inside each block remain intentionally unallocated for
+future egress or other cluster services; for example, `ipi1` keeps `.210–.214`
+free. Do not allocate those addresses to provisioning bridges or nodes.
+
+`.245–.254` reserved as buffer. Cluster service and node IPs are on
+`192.168.122.0/24`. Each slot has its own provisioning network for PXE,
+bootstrap Ironic services, and VBMC reachability:
+
+| Slot | Libvirt network | Bridge | Provisioning CIDR | Host/VBMC address |
+|------|-----------------|--------|--------------------|-------------------|
+| `ipi1` | `provisioning-ipi1` | `prov-ipi1` | `192.168.10.0/24` | `192.168.10.1` |
+| `ipi2` | `provisioning-ipi2` | `prov-ipi2` | `192.168.11.0/24` | `192.168.11.1` |
+| `ipi3` | `provisioning-ipi3` | `prov-ipi3` | `192.168.12.0/24` | `192.168.12.1` |
 
 | Component | Details |
 |-----------|---------|
-| Masters | 3 VMs, 8 vCPUs, 32G RAM each |
-| Workers | 2 VMs, 4 vCPUs, 16G RAM each |
+| Masters | 3 VMs, 4 vCPUs, 16G RAM each |
+| Workers | 2 VMs, 2 vCPUs, 8G RAM each |
 | VIPs | API VIP = `.offset`, Ingress VIP = `.offset+1` (managed by keepalived on nodes) |
 | Master IPs | `.offset+2` through `.offset+4` |
 | Worker IPs | `.offset+5` through `.offset+9` |
 | Spare | `.offset+10` through `.offset+14` |
-| Provisioning | PXE boot via ironic over `provisioning` network (`192.168.0.0/24`) |
+| Provisioning | PXE boot via the slot-scoped provisioning bridge; the installer owns the bootstrap Ironic/PXE context |
 | BMC | VirtualBMC (VBMC) exposes VMs as IPMI endpoints for the installer |
 | DNS | API, wildcard apps, and node records for each fixed slot in the managed forward/reverse zones |
 | HAProxy | Not needed — IPI uses keepalived VIPs on the nodes |
@@ -213,26 +245,20 @@ All IPs on `192.168.122.0/24` (libvirt default network). API/apps traffic routes
 **Additionally required:**
 - OpenShift pull secret ([Get one here](https://console.redhat.com/openshift/install/pull-secret)) — default location: `/root/pull-secret.txt`, override with `PULL_SECRET_FILE` env var
 - SSH public key — default: `~/.ssh/id_ed25519.pub`, override with `SSH_KEY_FILE` env var
-- For IPI: `provisioning` libvirt network and `vbmcd` service (see below)
+- For IPI: `vbmcd` service; the selected slot's provisioning network is created and validated automatically by `ocp-ipi-deploy.sh`
 
-**IPI provisioning network setup:**
+**IPI provisioning network behavior:**
+
+The deployment script creates the slot network if it does not exist, verifies
+its bridge and gateway if it does, and enables autostart. It deliberately does
+not add a libvirt DHCP range: the per-install bootstrap Ironic/PXE services
+own provisioning DHCP/TFTP state. The old shared `provisioning` network is
+left untouched so an already-installed legacy cluster is not disrupted.
 
 ```bash
-# Create the provisioning network for IPI baremetal PXE boot
-cat > /tmp/provisioning-net.xml <<EOF
-<network>
-  <name>provisioning</name>
-  <bridge name='provisioning' stp='on' delay='0'/>
-  <ip address='192.168.0.1' netmask='255.255.255.0'/>
-</network>
-EOF
-virsh net-define /tmp/provisioning-net.xml
-virsh net-start provisioning
-virsh net-autostart provisioning
-
 # Start VirtualBMC daemon
 pip install virtualbmc
-vbmcd
+systemctl enable --now vbmcd
 ```
 
 ## Setup
@@ -360,7 +386,8 @@ All settings via environment variables (or defaults in `config.py`):
 | `LABPORTAL_IPI_SCRIPT` | `/root/labs/ocp-ipi-deploy.sh` | Path to IPI deploy script |
 | `LABPORTAL_ALLOW_SNO` | `false` | Allow new SNO deployments on peer and boss machines (`true`, `yes`, `on`, or `1`) |
 | `LABPORTAL_QUEUE_INTERVAL` | `10` seconds | Scheduler poll interval |
-| `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer added after an active IPI reservation expires before estimating the next IPI start |
+| `LABPORTAL_IPI_SERIALIZED` | `false` | Temporary migration switch; when true, wait only for a live IPI bootstrap VM |
+| `LABPORTAL_IPI_CLEANUP_BUFFER_SECS` | `900` seconds | Buffer used only for the migration-mode IPI estimate |
 | `LABPORTAL_CONSOLE_PORT_BASE` | `6100` | First direct BigB console port; UPI slots come first, followed by IPI slots |
 | `LABPORTAL_CONSOLE_BIND_IP` | `0.0.0.0` | Host address on which direct console listeners bind |
 | `CLUSTERS_DIR` | `/kvm/clusters` | Directory where cluster artifacts are stored |
@@ -375,16 +402,22 @@ The host runs with SELinux **enforcing** at all times. Firewall ports are opened
 |--------|--------|
 | SELinux | Always enforcing; never set to permissive |
 | Firewall | Default-deny; only required ports are opened per zone |
-| VBMC ports | UDP 6230-6260 opened in `libvirt` zone only (for ironic on provisioning network) |
+| VBMC ports | Per-slot UDP ranges opened in the `libvirt` zone only; each IPI node has a unique VBMC port |
 | VNC | Bound to `127.0.0.1` only — not exposed to the network |
 | Direct console ports | TCP `6100` onward, one port per configured UPI and fixed IPI slot; restrict these ports to the lab-user network when a host firewall is enabled |
 | DNS zone files | UPI and IPI records are generated in managed forward/reverse zones owned by `named:named` with `named_zone_t` SELinux context |
 | Portal | Runs as root via systemd; proxied through Apache with HTTPS/TLS |
 | SSH accounts | Password expiry (180 days), account lockout after 30 days inactivity, forced password change on first login |
 
-IPI also uses a shared provisioning network for DHCP/PXE, Ironic, and virtual BMC communication. In this lab that provisioning plane supports one active IPI cluster at a time. The `ipi1`, `ipi2`, and `ipi3` service-IP blocks remain available for queued requests, but IPI requests are not launched in parallel. A deployment is admitted only after the current installer has finished and, for another IPI cluster, the active IPI reservation has expired and cleanup has completed.
+IPI no longer depends on one shared provisioning plane. Every slot has a
+separate libvirt bridge/CIDR, unique VM/MAC/VBMC identities, and its own
+installer directory. `openshift-install` creates the bootstrap Ironic/PXE
+services inside that install's context, so DHCP/PXE state is not shared across
+slots. `vbmcd` remains one daemon, but each node uses a unique port range.
 
-For a larger environment, concurrent IPI installations require isolated provisioning networks and independently coordinated DHCP/PXE/Ironic/BMC state per cluster, or an explicitly multi-tenant provisioning service. A shared data or bare-metal network alone is not sufficient isolation for concurrent provisioning.
+During rollout, operators may set `LABPORTAL_IPI_SERIALIZED=true` and remove
+it after the slot networks have been checked. The queue then permits parallel
+IPI bootstrap contexts subject to the same CPU/RAM reservations as UPI.
 
 ## Usage
 
@@ -399,7 +432,10 @@ For a larger environment, concurrent IPI installations require isolated provisio
 7. Click **Deploy Cluster** — the request is admitted immediately when safe, otherwise retained in the deployment queue
 8. Monitor progress via **View Logs**
 
-Queued requests show their position and an estimated start time when the current IPI reservation has a known expiry. Estimates are intentionally conservative and can be unavailable when an installer or stale state has no trustworthy completion time. Use **Request admin review** for an urgent request; administrators decide whether it can be scheduled sooner.
+Queued requests show their position and whether they are waiting for CPU/RAM
+capacity. In the temporary serialized IPI mode, a request whose peer has a
+live bootstrap may also show a conservative estimate. Use **Request admin
+review** only for that migration case; it never bypasses admission controls.
 
 ### Extend a Cluster Beyond 1 Week
 
@@ -441,7 +477,7 @@ Click **Delete Cluster** in the portal dashboard (or wait for the lifetime to ex
 | **Password Reset** | Self-service forgot password flow; admin-approved reset with forced password change |
 | **Install Types** | UPI (fixed slots, HAProxy) and IPI baremetal (fixed DNS-backed slots, VBMC/Ironic, keepalived) |
 | **Resource Check** | Validates whether a request can fit on the host; busy capacity is handled by the durable queue |
-| **Deployment Queue** | One installer process globally; queued requests show position, safe ETA when available, and admin-review escalation |
+| **Deployment Queue** | Concurrent resource-limited UPI/IPI installers; queued requests show position and migration-mode IPI status |
 | **Version Validation** | Checks OCP version exists on the mirror before starting deployment |
 | **Cluster Deploy** | One-click deploy with install type picker, detached process |
 | **Cluster Delete** | Admin: any cluster. Users: only their own. Cleans up VMs, storage, VBMC, DNS, DB records |
@@ -458,9 +494,9 @@ Click **Delete Cluster** in the portal dashboard (or wait for the lifetime to ex
 
 | Role | Count | RAM | vCPUs | Disk | VM Name |
 |------|-------|-----|-------|------|---------|
-| Bootstrap | 1 | 32 GB | 8 | 120 GB | `vm-<slot>-bootstrap` |
-| Master | 3 | 32 GB | 8 | 120 GB | `vm-<slot>-master-{0,1,2}` |
-| Worker | 2 | 16 GB | 4 | 120 GB | `vm-<slot>-worker-{0,1}` |
+| Bootstrap | 1 | 16 GB | 4 | 120 GB | `vm-<slot>-bootstrap` |
+| Master | 3 | 16 GB | 4 | 120 GB | `vm-<slot>-master-{0,1,2}` |
+| Worker | 2 | 8 GB | 2 | 120 GB | `vm-<slot>-worker-{0,1}` |
 
 Bootstrap VM is automatically destroyed after bootstrap-complete to reclaim resources.
 
@@ -468,8 +504,8 @@ Bootstrap VM is automatically destroyed after bootstrap-complete to reclaim reso
 
 | Role | Count | RAM | vCPUs | Disk | VM Name |
 |------|-------|-----|-------|------|---------|
-| Master | 3 | 32 GB | 8 | 120 GB | `vm-<slot>-master-{0,1,2}` |
-| Worker | 2 | 16 GB | 4 | 120 GB | `vm-<slot>-worker-{0,1}` |
+| Master | 3 | 16 GB | 4 | 120 GB | `vm-<slot>-master-{0,1,2}` |
+| Worker | 2 | 8 GB | 2 | 120 GB | `vm-<slot>-worker-{0,1}` |
 
 Bootstrap VM is created and destroyed automatically by `openshift-install`.
 

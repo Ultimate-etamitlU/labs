@@ -1,16 +1,30 @@
 import unittest
 from unittest.mock import patch
 
-from config import OCP_RELEASES, console_ports, console_url, ocp_mirror_channel, ocp_mirror_url
+from config import (
+    IPI_PROVISIONING_NETWORKS,
+    OCP_RELEASES,
+    console_ports,
+    console_url,
+    ocp_mirror_channel,
+    ocp_mirror_url,
+)
 
 
 class OcpVersionTests(unittest.TestCase):
     def test_release_preset_for_ocp_5_ec2(self):
-        self.assertEqual(OCP_RELEASES["ocp5-ec2"]["label"], "OpenShift 5.0 - EC2")
-        self.assertEqual(OCP_RELEASES["ocp5-ec2"]["version"], "5.0.0-rc.2")
+        self.assertEqual(OCP_RELEASES["ocp5-ec2"]["label"], "OpenShift 5.0 - EC2 (RC4)")
+        self.assertEqual(OCP_RELEASES["ocp5-ec2"]["version"], "5.0.0-rc.4")
+        self.assertEqual(OCP_RELEASES["ocp5-ec2-rc2"]["label"], "OpenShift 5.0 - EC2 (RC2)")
+        self.assertEqual(OCP_RELEASES["ocp5-ec2-rc2"]["version"], "5.0.0-rc.2")
 
     def test_mirror_channels(self):
         self.assertEqual(ocp_mirror_channel("4.22.14"), "openshift-v4")
+        self.assertEqual(ocp_mirror_channel("5.0.0-rc.4"), "openshift-v5")
+        self.assertEqual(
+            ocp_mirror_url("5.0.0-rc.4"),
+            "https://mirror.openshift.com/pub/openshift-v5/clients/ocp/5.0.0-rc.4/",
+        )
         self.assertEqual(ocp_mirror_channel("5.0.0-rc.2"), "openshift-v5")
         self.assertEqual(
             ocp_mirror_url("5.0.0-rc.2"),
@@ -20,6 +34,16 @@ class OcpVersionTests(unittest.TestCase):
     def test_unsupported_major_version(self):
         with self.assertRaises(ValueError):
             ocp_mirror_channel("6.0.0")
+
+    def test_ipi_provisioning_networks_are_isolated(self):
+        self.assertEqual(
+            {details["network"] for details in IPI_PROVISIONING_NETWORKS.values()},
+            {"provisioning-ipi1", "provisioning-ipi2", "provisioning-ipi3"},
+        )
+        self.assertEqual(
+            {details["cidr"] for details in IPI_PROVISIONING_NETWORKS.values()},
+            {"192.168.10.0/24", "192.168.11.0/24", "192.168.12.0/24"},
+        )
 
     def test_direct_console_ports_follow_slot_order(self):
         with patch("config.cluster_slots", return_value={"upi2": 131, "upi1": 110}):

@@ -17,7 +17,8 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - VirtualBMC daemon running (vbmcd)
-#   - libvirt networks: "default" (baremetal) and "provisioning" (PXE)
+#   - libvirt "default" network (baremetal); the slot-scoped PXE network is
+#     created and validated automatically
 #   - Pull secret at /root/pull-secret.txt
 #   - SSH key at /etc/labusers/id_ed25519.pub
 # =============================================================================
@@ -58,11 +59,78 @@ BASE_DIR="$STORAGE_DIR/client_tools/$VERSION"
 INSTALL_DIR="$STORAGE_DIR/clusters/${CLUSTER_NAME}-${VERSION}"
 MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERSION"
 
-# Networking
-PROV_BRIDGE="provisioning"
+# Networking — every IPI slot gets its own provisioning L2 context.  The
+# portal writes the authoritative mapping to /etc/ocp-lab.conf; the fallback
+# keeps direct invocation usable before that file has been regenerated.
 BM_BRIDGE="virbr0"
-PROV_NET_CIDR="192.168.0.0/24"
-PROV_BRIDGE_IP="192.168.0.1"
+PROV_NETWORK_NAME=""
+PROV_BRIDGE=""
+PROV_NET_CIDR=""
+PROV_BRIDGE_IP=""
+
+select_ipi_provisioning_network() {
+    local entry slot network bridge cidr gateway
+    for entry in ${IPI_PROVISIONING_NETWORKS:-}; do
+        IFS=: read -r slot network bridge cidr gateway <<< "$entry"
+        if [[ "$slot" == "$CLUSTER_NAME" ]]; then
+            PROV_NETWORK_NAME="$network"
+            PROV_BRIDGE="$bridge"
+            PROV_NET_CIDR="$cidr"
+            PROV_BRIDGE_IP="$gateway"
+            break
+        fi
+    done
+
+    if [[ -z "$PROV_NETWORK_NAME" ]]; then
+        case "$CLUSTER_NAME" in
+            ipi1) PROV_NETWORK_NAME="provisioning-ipi1"; PROV_BRIDGE="prov-ipi1"; PROV_NET_CIDR="192.168.10.0/24"; PROV_BRIDGE_IP="192.168.10.1" ;;
+            ipi2) PROV_NETWORK_NAME="provisioning-ipi2"; PROV_BRIDGE="prov-ipi2"; PROV_NET_CIDR="192.168.11.0/24"; PROV_BRIDGE_IP="192.168.11.1" ;;
+            ipi3) PROV_NETWORK_NAME="provisioning-ipi3"; PROV_BRIDGE="prov-ipi3"; PROV_NET_CIDR="192.168.12.0/24"; PROV_BRIDGE_IP="192.168.12.1" ;;
+            *)
+                echo "FAIL: no isolated provisioning network is configured for IPI slot '$CLUSTER_NAME'."
+                echo "      Add the slot to IPI_PROVISIONING_NETWORKS in /etc/ocp-lab.conf."
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+select_ipi_provisioning_network
+
+ensure_provisioning_network() {
+    local xml_file xml
+    if virsh net-info "$PROV_NETWORK_NAME" &>/dev/null; then
+        xml=$(virsh net-dumpxml "$PROV_NETWORK_NAME")
+        if ! grep -Eq "<bridge name=['\"]${PROV_BRIDGE}['\"]" <<< "$xml" || \
+           ! grep -Eq "<ip address=['\"]${PROV_BRIDGE_IP}['\"]" <<< "$xml"; then
+            echo "FAIL: libvirt network '$PROV_NETWORK_NAME' does not match the expected isolated IPI context."
+            echo "      Expected bridge=$PROV_BRIDGE gateway=$PROV_BRIDGE_IP"
+            return 1
+        fi
+        if [[ "$(virsh net-info "$PROV_NETWORK_NAME" | awk '/^Active:/{print $2}')" != "yes" ]]; then
+            virsh net-start "$PROV_NETWORK_NAME"
+        fi
+        virsh net-autostart "$PROV_NETWORK_NAME" >/dev/null
+        return 0
+    fi
+
+    xml_file=$(mktemp "/tmp/${PROV_NETWORK_NAME}.XXXXXX.xml")
+    cat > "$xml_file" <<_PROVISIONING_NETWORK_
+<network>
+  <name>${PROV_NETWORK_NAME}</name>
+  <bridge name='${PROV_BRIDGE}' stp='off' delay='0'/>
+  <ip address='${PROV_BRIDGE_IP}' netmask='255.255.255.0'/>
+</network>
+_PROVISIONING_NETWORK_
+    if ! virsh net-define "$xml_file" >/dev/null; then
+        rm -f "$xml_file"
+        return 1
+    fi
+    rm -f "$xml_file"
+    virsh net-start "$PROV_NETWORK_NAME"
+    virsh net-autostart "$PROV_NETWORK_NAME" >/dev/null
+    echo "Created isolated provisioning network $PROV_NETWORK_NAME ($PROV_NET_CIDR, bridge $PROV_BRIDGE)."
+}
 
 # VIPs — managed by keepalived on the cluster nodes (no HAProxy needed)
 API_VIP="192.168.122.${IP_OFFSET}"
@@ -83,6 +151,15 @@ VM_PREFIX="vm-${CLUSTER_NAME}"
 # Node count
 NUM_MASTERS=3
 NUM_WORKERS=2
+
+# OpenShift bare-metal minimums (OCP 4.20/4.21 documentation).  The IPI
+# bootstrap VM is temporary but is included in the pre-flight peak footprint.
+BOOTSTRAP_VCPUS=4
+BOOTSTRAP_RAM_MB=16384
+CONTROL_PLANE_VCPUS=4
+CONTROL_PLANE_RAM_MB=16384
+WORKER_VCPUS=2
+WORKER_RAM_MB=8192
 
 # Pull secret and SSH key
 PULL_SECRET_FILE="${PULL_SECRET_FILE:-/root/pull-secret.txt}"
@@ -153,7 +230,7 @@ echo "=== Pre-flight checks ==="
 preflight_ok=true
 
 # Required commands
-for cmd in virsh virt-install vbmc ipmitool curl python3; do
+for cmd in virsh virt-install vbmc ipmitool curl python3 flock; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "FAIL: '$cmd' is not installed."
         preflight_ok=false
@@ -184,13 +261,13 @@ if ! virsh net-info default &>/dev/null; then
     preflight_ok=false
 fi
 
-# libvirt provisioning network
-if ! virsh net-info provisioning &>/dev/null; then
-    echo "FAIL: libvirt 'provisioning' network does not exist."
-    preflight_ok=false
-elif [ "$(virsh net-info provisioning 2>/dev/null | awk '/^Active:/{print $2}')" != "yes" ]; then
-    echo "FAIL: libvirt 'provisioning' network is not active."
-    preflight_ok=false
+# Create or validate this slot's isolated provisioning network.  The legacy
+# shared "provisioning" network is intentionally left untouched for existing
+# clusters; new installs never attach to it.
+if command -v virsh &>/dev/null; then
+    if ! ensure_provisioning_network; then
+        preflight_ok=false
+    fi
 fi
 
 # Check for existing VMs with this prefix
@@ -217,12 +294,19 @@ for i in $(seq 0 $(( TOTAL_NODES - 1 ))); do
     fi
 done
 
-# RAM check — 3 masters × 32G + 2 workers × 16G = 128G
+# CPU/RAM check — include the temporary bootstrap VM in the peak footprint.
+HOST_VCPUS=$(nproc)
+REQUIRED_VCPUS=$(( BOOTSTRAP_VCPUS + NUM_MASTERS * CONTROL_PLANE_VCPUS + NUM_WORKERS * WORKER_VCPUS ))
+if [ "$HOST_VCPUS" -lt "$REQUIRED_VCPUS" ]; then
+    echo "WARN: Host exposes ${HOST_VCPUS} CPUs, IPI peak needs ~${REQUIRED_VCPUS} vCPUs."
+    echo "      Deployment may fail or be very slow due to CPU contention."
+fi
+
 AVAIL_RAM_KB=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
 AVAIL_RAM_GB=$(( AVAIL_RAM_KB / 1024 / 1024 ))
-REQUIRED_RAM_GB=$(( NUM_MASTERS * 32 + NUM_WORKERS * 16 - 6 ))
+REQUIRED_RAM_GB=$(( (BOOTSTRAP_RAM_MB + NUM_MASTERS * CONTROL_PLANE_RAM_MB + NUM_WORKERS * WORKER_RAM_MB) / 1024 ))
 if [ "$AVAIL_RAM_GB" -lt "$REQUIRED_RAM_GB" ]; then
-    echo "WARN: Only ${AVAIL_RAM_GB} GB RAM available, IPI cluster needs ~$(( NUM_MASTERS * 32 + NUM_WORKERS * 16 )) GB."
+    echo "WARN: Only ${AVAIL_RAM_GB} GB RAM available, IPI peak needs ~${REQUIRED_RAM_GB} GB."
     echo "      Deployment may fail or be very slow."
 fi
 
@@ -267,25 +351,27 @@ echo "Cluster:       $CLUSTER_NAME"
 echo "OCP Version:   $VERSION"
 echo "API VIP:       $API_VIP"
 echo "Ingress VIP:   $INGRESS_VIP"
+echo "Provisioning:  $PROV_NETWORK_NAME ($PROV_NET_CIDR, bridge $PROV_BRIDGE)"
 echo "Masters:       192.168.122.$(( IP_OFFSET + 2 )) - 192.168.122.$(( IP_OFFSET + 4 ))"
 echo "Workers:       192.168.122.$(( IP_OFFSET + 5 )) - 192.168.122.$(( IP_OFFSET + 4 + NUM_WORKERS ))"
 echo "VBMC ports:    $VBMC_PORT_BASE - $(( VBMC_PORT_BASE + TOTAL_NODES - 1 ))"
 echo ""
 
-mkdir -p "$BASE_DIR" "$INSTALL_DIR"
+TOOL_BIN_DIR="$BASE_DIR/bin"
+mkdir -p "$BASE_DIR" "$TOOL_BIN_DIR" "$INSTALL_DIR"
 
 # --- 1. TOOLS MANAGEMENT ---
 install_binary() {
     local binary=$1
-    sudo cp "$BASE_DIR/$binary" "/usr/local/bin/${binary}.tmp.$$"
-    sudo chmod 0755 "/usr/local/bin/${binary}.tmp.$$"
-    sudo mv "/usr/local/bin/${binary}.tmp.$$" "/usr/local/bin/$binary"
+    cp "$BASE_DIR/$binary" "$TOOL_BIN_DIR/${binary}.tmp.$$"
+    chmod 0755 "$TOOL_BIN_DIR/${binary}.tmp.$$"
+    mv "$TOOL_BIN_DIR/${binary}.tmp.$$" "$TOOL_BIN_DIR/$binary"
 }
 
 check_and_get_tool() {
     local tool=$1; local binary=$2
 
-    if [[ -f "/usr/local/bin/$binary" ]] && [[ "$($binary version 2>/dev/null)" == *"$VERSION"* ]]; then
+    if [[ -f "$TOOL_BIN_DIR/$binary" ]] && [[ "$("$TOOL_BIN_DIR/$binary" version 2>/dev/null)" == *"$VERSION"* ]]; then
         echo "$binary $VERSION is already active."
         return
     fi
@@ -326,8 +412,12 @@ check_and_get_tool() {
     fi
 }
 
+exec 9>"$BASE_DIR/.tools.lock"
+flock 9
 check_and_get_tool "openshift-install" "openshift-install"
 check_and_get_tool "openshift-client" "oc"
+flock -u 9
+OPENSHIFT_INSTALL="$TOOL_BIN_DIR/openshift-install"
 
 # --- 2. CREATE EMPTY VMs ---
 echo ""
@@ -355,11 +445,11 @@ for i in $(seq 0 $(( NUM_MASTERS - 1 ))); do
 
     echo "Creating VM: $vm_name (prov=$prov_mac, bm=$bm_mac)"
     virt-install --name "$vm_name" \
-        --ram 32768 \
-        --vcpus 8 \
+        --ram "$CONTROL_PLANE_RAM_MB" \
+        --vcpus "$CONTROL_PLANE_VCPUS" \
         --cpu host-passthrough \
         --disk size=120,bus=virtio \
-        --network network=provisioning,mac="$prov_mac" \
+        --network network="$PROV_NETWORK_NAME",mac="$prov_mac" \
         --network network=default,mac="$bm_mac" \
         --pxe \
         --boot network,hd \
@@ -396,11 +486,11 @@ for i in $(seq 0 $(( NUM_WORKERS - 1 ))); do
 
     echo "Creating VM: $vm_name (prov=$prov_mac, bm=$bm_mac)"
     virt-install --name "$vm_name" \
-        --ram 16384 \
-        --vcpus 4 \
+        --ram "$WORKER_RAM_MB" \
+        --vcpus "$WORKER_VCPUS" \
         --cpu host-passthrough \
         --disk size=120,bus=virtio \
-        --network network=provisioning,mac="$prov_mac" \
+        --network network="$PROV_NETWORK_NAME",mac="$prov_mac" \
         --network network=default,mac="$bm_mac" \
         --pxe \
         --boot network,hd \
@@ -597,7 +687,25 @@ if [ "$(cat /sys/class/net/${BM_BRIDGE}/operstate 2>/dev/null)" != "up" ]; then
     echo "${BM_BRIDGE} operstate: $(cat /sys/class/net/${BM_BRIDGE}/operstate 2>/dev/null)"
 fi
 
-openshift-install create cluster --dir=. --log-level=info
+# The per-slot provisioning bridge also needs carrier before the installer
+# validates provisioningBridge.  It is otherwise DOWN when all slot VMs are
+# powered off, even though the libvirt network itself is active.
+ip link set "$PROV_BRIDGE" up 2>/dev/null || true
+if [ "$(cat /sys/class/net/${PROV_BRIDGE}/operstate 2>/dev/null)" != "up" ]; then
+    echo "Bringing up ${PROV_BRIDGE} by starting a VM..."
+    virsh start "${VM_PREFIX}-master-0" 2>/dev/null || true
+    for _w in $(seq 1 5); do
+        [ "$(cat /sys/class/net/${PROV_BRIDGE}/operstate 2>/dev/null)" = "up" ] && break
+        sleep 1
+    done
+    echo "${PROV_BRIDGE} operstate: $(cat /sys/class/net/${PROV_BRIDGE}/operstate 2>/dev/null)"
+fi
+if [ "$(cat /sys/class/net/${PROV_BRIDGE}/operstate 2>/dev/null)" != "up" ]; then
+    echo "FAIL: provisioning bridge ${PROV_BRIDGE} is not up."
+    exit 1
+fi
+
+"$OPENSHIFT_INSTALL" create cluster --dir=. --log-level=info
 
 # Fix qcow2 disk image ownership created by Ironic during provisioning.
 # Ironic creates disks as root:root, but libvirt needs qemu:qemu access.

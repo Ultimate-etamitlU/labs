@@ -34,29 +34,42 @@ class DeploymentQueueSchemaTests(unittest.TestCase):
         self.assertIn("failure_reason", columns)
         self.assertIn("process_group", columns)
 
-    def test_claim_is_globally_serialized_and_only_claims_queued_rows(self):
+    def test_claim_allows_parallel_jobs_and_only_claims_queued_rows(self):
         self.conn.execute(
             "INSERT INTO deployments (cluster_name, ocp_version, status, queued_at) "
             "VALUES ('upi1', '4.19.22', 'queued', CURRENT_TIMESTAMP)"
         )
         self.conn.execute(
             "INSERT INTO deployments (cluster_name, ocp_version, status) "
-            "VALUES ('upi2', '4.19.22', 'deploying')"
+            "VALUES ('upi2', '4.19.22', 'queued')"
         )
-        self.conn.commit()
-
-        claimed = claim_job(self.conn, 1, "worker-a")
-        self.assertIsNone(claimed)
-
-        self.conn.execute("UPDATE deployments SET status='completed' WHERE id=2")
         self.conn.commit()
 
         claimed = claim_job(self.conn, 1, "worker-a")
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["status"], STARTING_STATUS)
         self.assertEqual(claimed["claimed_by"], "worker-a")
+        parallel = claim_job(self.conn, 2, "worker-b")
+        self.assertIsNotNone(parallel)
+        self.assertEqual(parallel["status"], STARTING_STATUS)
         self.assertIsNone(claim_job(self.conn, 1, "worker-b"))
-        self.assertIsNone(claim_job(self.conn, 2, "worker-a"))
+
+    def test_claim_enforces_optional_resource_capacity_transactionally(self):
+        self.conn.execute(
+            "INSERT INTO deployments (cluster_name, ocp_version, status, "
+            "resource_vcpus, resource_ram_gb, queued_at) "
+            "VALUES ('upi1', '4.19.22', 'deploying', 20, 80, CURRENT_TIMESTAMP)"
+        )
+        self.conn.execute(
+            "INSERT INTO deployments (cluster_name, ocp_version, status, "
+            "resource_vcpus, resource_ram_gb, queued_at) "
+            "VALUES ('upi2', '4.19.22', 'queued', 20, 80, CURRENT_TIMESTAMP)"
+        )
+        self.conn.commit()
+
+        self.assertIsNone(claim_job(self.conn, 2, "worker-a", capacity=(30, 120)))
+        claimed = claim_job(self.conn, 2, "worker-a", capacity=(40, 160))
+        self.assertIsNotNone(claimed)
 
     def test_status_sql_is_fixed_and_parameter_free(self):
         status_sql = sql_statuses((QUEUED_STATUS, "stale"))

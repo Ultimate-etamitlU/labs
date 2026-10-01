@@ -51,6 +51,15 @@ MIRROR_URL="https://mirror.openshift.com/pub/${MIRROR_CHANNEL}/clients/ocp/$VERS
 BRIDGE_IP="192.168.122.1"
 NETMASK="255.255.255.0"
 
+# OpenShift bare-metal minimums. The bootstrap VM is temporary but is
+# included in the pre-flight peak footprint.
+BOOTSTRAP_VCPUS=4
+BOOTSTRAP_RAM_MB=16384
+CONTROL_PLANE_VCPUS=4
+CONTROL_PLANE_RAM_MB=16384
+WORKER_VCPUS=2
+WORKER_RAM_MB=8192
+
 # For fixed UPI slots, enforce the correct offset regardless of args.
 # This prevents DHCP collisions when scripts are run manually with wrong offsets.
 declare -A _FIXED_SLOTS=([upi1]=110 [upi2]=131 [upi3]=151)
@@ -95,7 +104,7 @@ echo "=== Pre-flight checks ==="
 preflight_ok=true
 
 # Required commands
-for cmd in openshift-install oc coreos-installer virsh virt-install curl jq python3; do
+for cmd in openshift-install oc coreos-installer virsh virt-install curl jq python3 flock; do
     # openshift-install and oc will be downloaded, skip if not yet present
     if [[ "$cmd" == "openshift-install" || "$cmd" == "oc" ]]; then
         continue
@@ -129,10 +138,10 @@ elif [ "$(virsh net-info default 2>/dev/null | awk '/^Active:/{print $2}')" != "
     preflight_ok=false
 fi
 
-# RAM check — need at least 48 GB for the full cluster (5 nodes × 16 GB = 80 GB ideal, 48 GB minimum)
+# RAM check — include the temporary bootstrap VM in the peak footprint.
 TOTAL_RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
 TOTAL_RAM_GB=$(( TOTAL_RAM_KB / 1024 / 1024 ))
-REQUIRED_RAM_GB=48
+REQUIRED_RAM_GB=$(( (BOOTSTRAP_RAM_MB + (3 * CONTROL_PLANE_RAM_MB) + (2 * WORKER_RAM_MB)) / 1024 ))
 if [ "$TOTAL_RAM_GB" -lt "$REQUIRED_RAM_GB" ]; then
     echo "WARN: System has ${TOTAL_RAM_GB} GB RAM, cluster needs ~${REQUIRED_RAM_GB} GB."
     echo "      Deployment may fail or be very slow due to swapping."
@@ -180,22 +189,24 @@ fi
 echo "=== Pre-flight checks passed ==="
 echo ""
 
-mkdir -p "$BASE_DIR" "$INSTALL_DIR"
+TOOL_BIN_DIR="$BASE_DIR/bin"
+mkdir -p "$BASE_DIR" "$TOOL_BIN_DIR" "$INSTALL_DIR"
 
 # --- 1. TOOLS MANAGEMENT ---
 install_binary() {
     local binary=$1
-    sudo cp "$BASE_DIR/$binary" "/usr/local/bin/${binary}.tmp.$$"
-    sudo chmod 0755 "/usr/local/bin/${binary}.tmp.$$"
-    # Atomic swap via mv — existing processes keep their fd to the old inode
-    sudo mv "/usr/local/bin/${binary}.tmp.$$" "/usr/local/bin/$binary"
+    cp "$BASE_DIR/$binary" "$TOOL_BIN_DIR/${binary}.tmp.$$"
+    chmod 0755 "$TOOL_BIN_DIR/${binary}.tmp.$$"
+    # Atomic swap within this version's directory; another version cannot
+    # replace the installer used by this deployment.
+    mv "$TOOL_BIN_DIR/${binary}.tmp.$$" "$TOOL_BIN_DIR/$binary"
 }
 
 check_and_get_tool() {
     local tool=$1; local binary=$2
 
     # Already installed and matches this version — nothing to do
-    if [[ -f "/usr/local/bin/$binary" ]] && [[ "$($binary version 2>/dev/null)" == *"$VERSION"* ]]; then
+    if [[ -f "$TOOL_BIN_DIR/$binary" ]] && [[ "$("$TOOL_BIN_DIR/$binary" version 2>/dev/null)" == *"$VERSION"* ]]; then
         echo "$binary $VERSION is already active."
         return
     fi
@@ -241,6 +252,8 @@ check_and_get_tool() {
     fi
 }
 
+exec 9>"$BASE_DIR/.tools.lock"
+flock 9
 check_and_get_tool "openshift-install" "openshift-install"
 check_and_get_tool "openshift-client" "oc"
 
@@ -251,7 +264,7 @@ if [ -f "$MASTER_TEMPLATE_ISO" ]; then
     echo "Using cached RHCOS ISO: $MASTER_TEMPLATE_ISO"
 else
     echo "Querying RHCOS metadata for x86_64 Live ISO..."
-    STREAM_JSON=$(openshift-install coreos print-stream-json)
+    STREAM_JSON=$("$TOOL_BIN_DIR/openshift-install" coreos print-stream-json)
 
     # Parse JSON for the ISO URL — prefer jq, fall back to python3
     if command -v jq &>/dev/null; then
@@ -283,6 +296,9 @@ else
         fi
     fi
 fi
+
+flock -u 9
+OPENSHIFT_INSTALL="$TOOL_BIN_DIR/openshift-install"
 
 # --- 3. INSTALL-CONFIG & IGNITION GENERATION ---
 cd "$INSTALL_DIR"
@@ -322,8 +338,8 @@ _INSTALL_CONFIG_
 
 echo "Generating Ignition configs..."
 cp -f install-config.yaml install-config.yaml_backup
-openshift-install create manifests --dir=.
-openshift-install create ignition-configs --dir=.
+"$OPENSHIFT_INSTALL" create manifests --dir=.
+"$OPENSHIFT_INSTALL" create ignition-configs --dir=.
 # Restore backup as the install tool consumes the original
 cp install-config.yaml_backup install-config.yaml
 
@@ -395,12 +411,12 @@ deploy_node() {
 # --- 5. EXECUTION LOOP ---
 # Per-cluster VM names, MACs, and IPs derived from CLUSTER_NAME + IP_OFFSET
 # Usage: Name | RAM | CPU | MAC | Role | IP | Hostname
-deploy_node "${VM_PREFIX}-bootstrap" 16384 4  "52:54:00:${MAC_BASE}:00:10" "bootstrap" "192.168.122.$(( IP_OFFSET ))"     "bootstrap.${CLUSTER_NAME}.${BASE_DOMAIN}"
-deploy_node "${VM_PREFIX}-master-0"  16384 4  "52:54:00:${MAC_BASE}:00:11" "master"    "192.168.122.$(( IP_OFFSET + 1 ))" "master-0.${CLUSTER_NAME}.${BASE_DOMAIN}"
-deploy_node "${VM_PREFIX}-master-1"  16384 4  "52:54:00:${MAC_BASE}:00:12" "master"    "192.168.122.$(( IP_OFFSET + 2 ))" "master-1.${CLUSTER_NAME}.${BASE_DOMAIN}"
-deploy_node "${VM_PREFIX}-master-2"  16384 4  "52:54:00:${MAC_BASE}:00:13" "master"    "192.168.122.$(( IP_OFFSET + 3 ))" "master-2.${CLUSTER_NAME}.${BASE_DOMAIN}"
-deploy_node "${VM_PREFIX}-worker-0"  16384 2  "52:54:00:${MAC_BASE}:00:14" "worker"    "192.168.122.$(( IP_OFFSET + 4 ))" "worker-0.${CLUSTER_NAME}.${BASE_DOMAIN}"
-deploy_node "${VM_PREFIX}-worker-1"  16384 2  "52:54:00:${MAC_BASE}:00:15" "worker"    "192.168.122.$(( IP_OFFSET + 5 ))" "worker-1.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-bootstrap" "$BOOTSTRAP_RAM_MB" "$BOOTSTRAP_VCPUS" "52:54:00:${MAC_BASE}:00:10" "bootstrap" "192.168.122.$(( IP_OFFSET ))"     "bootstrap.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-master-0"  "$CONTROL_PLANE_RAM_MB" "$CONTROL_PLANE_VCPUS" "52:54:00:${MAC_BASE}:00:11" "master"    "192.168.122.$(( IP_OFFSET + 1 ))" "master-0.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-master-1"  "$CONTROL_PLANE_RAM_MB" "$CONTROL_PLANE_VCPUS" "52:54:00:${MAC_BASE}:00:12" "master"    "192.168.122.$(( IP_OFFSET + 2 ))" "master-1.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-master-2"  "$CONTROL_PLANE_RAM_MB" "$CONTROL_PLANE_VCPUS" "52:54:00:${MAC_BASE}:00:13" "master"    "192.168.122.$(( IP_OFFSET + 3 ))" "master-2.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-worker-0"  "$WORKER_RAM_MB" "$WORKER_VCPUS" "52:54:00:${MAC_BASE}:00:14" "worker"    "192.168.122.$(( IP_OFFSET + 4 ))" "worker-0.${CLUSTER_NAME}.${BASE_DOMAIN}"
+deploy_node "${VM_PREFIX}-worker-1"  "$WORKER_RAM_MB" "$WORKER_VCPUS" "52:54:00:${MAC_BASE}:00:15" "worker"    "192.168.122.$(( IP_OFFSET + 5 ))" "worker-1.${CLUSTER_NAME}.${BASE_DOMAIN}"
 
 # --- 6. MONITORING & CSR APPROVAL ---
 export KUBECONFIG="$INSTALL_DIR/auth/kubeconfig"
@@ -410,13 +426,13 @@ systemctl start "csr-approver@${CLUSTER_NAME}.service" 2>/dev/null || \
     echo "WARN: Could not start csr-approver service — approve CSRs manually if needed"
 
 echo "Waiting for Bootstrap (this takes approx 20 mins)..."
-openshift-install wait-for bootstrap-complete --dir=. --log-level=info
+"$OPENSHIFT_INSTALL" wait-for bootstrap-complete --dir=. --log-level=info
 
 echo "Deleting Bootstrap VM to reclaim RAM..."
 virsh destroy "${VM_PREFIX}-bootstrap" 2>/dev/null && virsh undefine "${VM_PREFIX}-bootstrap" --remove-all-storage 2>/dev/null
 
 echo "Waiting for Final Installation..."
-openshift-install wait-for install-complete --dir=. --log-level=info
+"$OPENSHIFT_INSTALL" wait-for install-complete --dir=. --log-level=info
 
 # Stop CSR approver if still running (it self-terminates, but just in case)
 systemctl stop "csr-approver@${CLUSTER_NAME}.service" 2>/dev/null || true

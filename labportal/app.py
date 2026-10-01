@@ -114,9 +114,14 @@ DEPLOYMENT_QUEUE_INTERVAL_SECS = int(
 )
 DEPLOYMENT_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 DEPLOYMENT_EXIT_SUFFIX = ".exit"
-# The active IPI cluster keeps the shared provisioning/Ironic plane occupied
-# until its reservation expires.  Leave a small operator-controlled buffer for
-# cleanup before admitting the next IPI request.
+# Migration switch for older hosts that still use the legacy shared IPI
+# provisioning bridge. New deployments use a slot-scoped provisioning
+# network, so the production default is parallel IPI admission. Operators can
+# set this to 1 while migrating an older host; even then only a live bootstrap
+# context blocks another IPI request, not a completed cluster reservation.
+IPI_SERIALIZED = os.environ.get("LABPORTAL_IPI_SERIALIZED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 IPI_CLEANUP_BUFFER_SECS = int(
     os.environ.get("LABPORTAL_IPI_CLEANUP_BUFFER_SECS", "900")
 )
@@ -245,12 +250,35 @@ CLUSTER_IP_RANGES = {
     "sno2": ("192.168.200.20", "192.168.200.20"),
 }
 
+# Keep the lifecycle choices in one place so deployment and extension flows
+# present and validate the same options.
+CLUSTER_LIFETIME_OPTIONS = [
+    {"value": "3", "label": "3 hours"},
+    {"value": "4", "label": "4 hours"},
+    {"value": "8", "label": "8 hours"},
+    {"value": "24", "label": "1 day"},
+    {"value": "48", "label": "2 days"},
+    {"value": "72", "label": "3 days"},
+    {"value": "168", "label": "1 week"},
+    {"value": "extend", "label": "More than a week (needs approval)"},
+]
+CLUSTER_LIFETIME_HOURS = {
+    option["value"]: int(option["value"])
+    for option in CLUSTER_LIFETIME_OPTIONS
+    if option["value"].isdigit()
+}
+
+
+def parse_lifetime_selection(value):
+    """Return (hours, needs_admin_approval) for a lifecycle choice."""
+    if value == "extend":
+        return 168, True
+    if value not in CLUSTER_LIFETIME_HOURS:
+        raise ValueError
+    return CLUSTER_LIFETIME_HOURS[value], False
+
 _ACTIVE_DEPLOYMENT_SQL = sql_statuses(ACTIVE_DEPLOYMENT_STATUSES)
 _RUNNING_DEPLOYMENT_SQL = running_statuses_sql()
-_IPI_OCCUPIED_STATUSES = tuple(
-    status for status in ACTIVE_DEPLOYMENT_STATUSES if status != QUEUED_STATUS
-)
-_IPI_OCCUPIED_SQL = sql_statuses(_IPI_OCCUPIED_STATUSES)
 
 
 def get_dhcp_host_map():
@@ -425,8 +453,10 @@ def get_deployment_queue():
     """Return visible queue jobs with safe position/blocking metadata.
 
     Completed/stale deployment rows remain in the database for audit, but are
-    intentionally not shown here.  A completed IPI row can still occupy the
-    shared provisioning plane until its cluster reservation expires.
+    intentionally not shown here. Queue admission is resource-aware rather
+    than globally FIFO: independent UPI jobs may run together, and isolated
+    IPI jobs may run together. During migration, ``IPI_SERIALIZED`` only
+    blocks while another IPI bootstrap VM is actually running.
     """
     statuses = sql_statuses((QUEUED_STATUS, STARTING_STATUS, DEPLOYING_STATUS))
     with get_db_ctx() as conn:
@@ -437,18 +467,9 @@ def get_deployment_queue():
             f"WHERE d.status IN ({statuses}) "
             "ORDER BY COALESCE(d.queued_at, d.started_at), d.id"
         ).fetchall()
-        active_ipi = conn.execute(
-            f"SELECT d.id, d.cluster_name, d.status, r.reserved_until "
-            f"FROM deployments d LEFT JOIN cluster_reservations r "
-            f"ON r.cluster_name=d.cluster_name "
-            f"WHERE d.install_type='ipi' AND d.status IN ({_IPI_OCCUPIED_SQL}) "
-            "ORDER BY d.id LIMIT 1"
-        ).fetchone()
-        running = conn.execute(
-            f"SELECT cluster_name, install_type FROM deployments "
-            f"WHERE status IN ({_RUNNING_DEPLOYMENT_SQL}) "
-            "ORDER BY COALESCE(started_at, claimed_at), id LIMIT 1"
-        ).fetchone()
+        active_ipi = None
+        if IPI_SERIALIZED:
+            active_ipi = _running_ipi_bootstrap()
 
     queue = []
     queued_position = 0
@@ -462,33 +483,28 @@ def get_deployment_queue():
         if job["status"] == QUEUED_STATUS:
             queued_position += 1
             job["queue_position"] = queued_position
-            if running:
-                job["blocking_reason"] = (
-                    f"Waiting for {running['install_type'].upper()} deployment "
-                    f"{running['cluster_name']} to finish."
-                )
-            elif job["install_type"] == "ipi" and active_ipi:
+            if job["install_type"] == "ipi" and active_ipi:
                 if queued_position == 1:
                     job["eta_at"] = _ipi_queue_eta(active_ipi["reserved_until"])
                 if job["eta_at"]:
                     job["blocking_reason"] = (
-                        f"Waiting for active IPI cluster {active_ipi['cluster_name']} "
-                        "to expire and be cleaned up."
+                        f"Waiting for active IPI bootstrap {active_ipi['cluster_name']} "
+                        "to finish."
                     )
                 elif queued_position > 1:
                     job["blocking_reason"] = (
-                        "Waiting for earlier queued requests and active IPI capacity."
+                        "Waiting for an active IPI bootstrap and available capacity."
                     )
                 else:
                     job["blocking_reason"] = (
-                        "Waiting for active IPI capacity; reservation expiry is unknown."
+                        "Waiting for active IPI bootstrap capacity; completion time is unknown."
                     )
-            elif queued_position > 1:
-                job["blocking_reason"] = "Waiting for earlier queued requests."
             else:
-                job["blocking_reason"] = "Next eligible request."
+                job["blocking_reason"] = "Waiting for available CPU/RAM capacity."
 
-            job["admin_review_required"] = not bool(job["eta_at"])
+            job["admin_review_required"] = bool(
+                job["install_type"] == "ipi" and active_ipi and not job["eta_at"]
+            )
         elif job["status"] in (STARTING_STATUS, DEPLOYING_STATUS):
             job["blocking_reason"] = "Installer is running."
 
@@ -524,6 +540,42 @@ def get_cluster_versions(clusters):
                 if version:
                     versions[name] = version
     return versions
+
+
+def _find_cluster_auth_file(cluster_name, filename):
+    """Find an auth artifact for the newest active cluster installation."""
+    if not valid_cluster_name(cluster_name):
+        return None
+
+    candidates = []
+    with get_db_ctx() as conn:
+        deployment = conn.execute(
+            f"SELECT cluster_name, ocp_version FROM deployments "
+            f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+            "LIMIT 1",
+            (cluster_name,),
+        ).fetchone()
+    if deployment:
+        active_path = os.path.join(
+            config.storage_dir(),
+            "clusters",
+            f"{deployment['cluster_name']}-{deployment['ocp_version']}",
+            "auth",
+            filename,
+        )
+        if os.path.isfile(active_path):
+            return active_path
+        candidates.append(active_path)
+
+    candidates.extend(
+        glob.glob(
+            os.path.join(
+                config.storage_dir(), "clusters", f"{cluster_name}-*", "auth", filename
+            )
+        )
+    )
+    existing = [path for path in candidates if os.path.isfile(path)]
+    return max(existing, key=os.path.getmtime) if existing else None
 
 
 def get_lab_status():
@@ -706,11 +758,16 @@ def generate_infra_config():
     ipi_slots_str = " ".join(
         f"{k}:{v}" for k, v in sorted(ipi_slots.items(), key=lambda x: x[1])
     )
+    ipi_provisioning_str = " ".join(
+        ":".join((name, details["network"], details["bridge"], details["cidr"], details["gateway"]))
+        for name, details in sorted(config.ipi_provisioning_networks().items())
+    )
     sdir = config.storage_dir()
     conf = f"""# Generated by OCP Lab Portal — do not edit manually
 BASE_DOMAIN="{domain}"
 CLUSTER_SLOTS="{slots_str}"
 IPI_SLOTS="{ipi_slots_str}"
+IPI_PROVISIONING_NETWORKS="{ipi_provisioning_str}"
 STORAGE_DIR="{sdir}"
 """
     try:
@@ -1557,14 +1614,32 @@ def _check_resource_capacity(install_type):
 
 
 def _check_resources(install_type):
-    """Check current capacity, including resources reserved by active jobs."""
+    """Check current capacity without double-counting active VM resources.
+
+    Running VMs are already reflected in the host counters, while a queued
+    job is represented by its durable peak reservation. Subtracting both
+    would reject valid concurrent installs, so only whichever view is larger
+    is used for each resource dimension.
+    """
+    capacity = _resource_capacity_snapshot()
+    required_cpus, required_ram = _resource_cost(install_type)
+    if capacity["available_cpus"] < required_cpus:
+        return False, (f"Not enough CPUs: {capacity['available_cpus']} available, "
+                       f"need {required_cpus}")
+    if capacity["available_ram"] < required_ram:
+        return False, (f"Not enough RAM: {capacity['available_ram']}G available, "
+                       f"need {required_ram}G")
+    return True, "OK"
+
+
+def _resource_capacity_snapshot():
+    """Return an admission budget that accounts for VMs and queued claims."""
     _, _, resources = get_lab_status()
     cpus_total = int(resources.get("cpus", 0))
     cpus_used = int(resources.get("cpus_used", 0))
     ram_total = int(resources.get("ram_total", 0))
     ram_used = int(resources.get("ram_used", 0))
 
-    required_cpus, required_ram = _resource_cost(install_type)
     reserved_cpus = 0
     reserved_ram = 0
     with get_db_ctx() as conn:
@@ -1577,35 +1652,68 @@ def _check_resources(install_type):
         reserved_cpus += int(job["resource_vcpus"] or fallback_cpus)
         reserved_ram += int(job["resource_ram_gb"] or fallback_ram)
 
-    cpus_free = cpus_total - cpus_used
-    ram_free = ram_total - ram_used
-
-    if cpus_free - reserved_cpus < required_cpus:
-        return False, (f"Not enough CPUs: {cpus_free} free, {reserved_cpus} reserved "
-                       f"by active deployments, need {required_cpus}")
-    if ram_free - reserved_ram < required_ram:
-        return False, (f"Not enough RAM: {ram_free}G free, {reserved_ram}G reserved "
-                       f"by active deployments, need {required_ram}G")
-    return True, "OK"
+    # Account for unrelated host load, but do not count an active deployment
+    # twice: its VMs appear in cpus_used/ram_used and its peak is in the DB.
+    host_cpu_overhead = max(0, cpus_used - reserved_cpus)
+    host_ram_overhead = max(0, ram_used - reserved_ram)
+    effective_cpus = max(0, cpus_total - host_cpu_overhead)
+    effective_ram = max(0, ram_total - host_ram_overhead)
+    return {
+        "max_cpus": effective_cpus,
+        "max_ram": effective_ram,
+        "reserved_cpus": reserved_cpus,
+        "reserved_ram": reserved_ram,
+        "available_cpus": max(0, effective_cpus - reserved_cpus),
+        "available_ram": max(0, effective_ram - reserved_ram),
+    }
 
 
 def _check_ipi_capacity(deployment_id):
-    """Keep one IPI cluster on the shared provisioning/Ironic plane."""
-    with get_db_ctx() as conn:
-        occupied_ipi = conn.execute(
-            f"SELECT d.cluster_name, d.status, r.reserved_until FROM deployments d "
-            f"LEFT JOIN cluster_reservations r ON r.cluster_name=d.cluster_name "
-            f"WHERE d.install_type='ipi' AND d.status IN ({_IPI_OCCUPIED_SQL}) "
-            f"AND d.id != ? ORDER BY d.id LIMIT 1",
-            (deployment_id,)
-        ).fetchone()
-    if occupied_ipi:
+    """Optionally gate legacy IPI admission on a live bootstrap VM."""
+    if not IPI_SERIALIZED:
+        return True, "OK"
+    occupied_ipi = _running_ipi_bootstrap()
+    if occupied_ipi and occupied_ipi["id"] != deployment_id:
         expiry = occupied_ipi["reserved_until"] or "unknown"
         return False, (
-            f"IPI capacity is occupied by {occupied_ipi['cluster_name']} "
+            f"IPI bootstrap capacity is occupied by {occupied_ipi['cluster_name']} "
             f"({occupied_ipi['status']}, reservation ends {expiry})"
         )
     return True, "OK"
+
+
+def _running_ipi_bootstrap():
+    """Return a running IPI deployment that owns a bootstrap VM, if any."""
+    with get_db_ctx() as conn:
+        active_ipis = conn.execute(
+            f"SELECT d.id, d.cluster_name, d.status, r.reserved_until "
+            f"FROM deployments d LEFT JOIN cluster_reservations r "
+            f"ON r.cluster_name=d.cluster_name "
+            f"WHERE d.install_type='ipi' AND d.status IN ({_RUNNING_DEPLOYMENT_SQL}) "
+            "ORDER BY COALESCE(d.started_at, d.claimed_at), d.id"
+        ).fetchall()
+    if not active_ipis:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["virsh", "list", "--name", "--state-running"],
+            capture_output=True, text=True, timeout=10,
+        )
+        running_vms = {
+            line.strip() for line in result.stdout.splitlines() if line.strip()
+        }
+    except (OSError, subprocess.SubprocessError):
+        running_vms = set()
+
+    # The installer names the bootstrap domain from its infraID, which starts
+    # with the cluster name in this lab. Do not fall back to an arbitrary
+    # ``*-bootstrap`` VM: a concurrent UPI bootstrap must not block IPI work.
+    bootstrap_vms = [name for name in running_vms if name.endswith("-bootstrap")]
+    for row in active_ipis:
+        if any(row["cluster_name"] in name for name in bootstrap_vms):
+            return row
+    return None
 
 
 @app.route("/user/dashboard")
@@ -1662,6 +1770,7 @@ def user_dashboard():
                            vms=vms, clusters=clusters, resources=resources,
                            cluster_slots=sorted(slots.keys()),
                            available_slots=available_slots,
+                           lifetime_options=CLUSTER_LIFETIME_OPTIONS,
                            install_types={
                                name: install_type
                                for name, install_type in config.INSTALL_TYPES.items()
@@ -1733,6 +1842,92 @@ def activate_console():
     )
 
 
+@app.route("/cluster/extend", methods=["POST"])
+@login_required
+def extend_cluster_lifecycle():
+    """Extend an active cluster by a self-service lifecycle option."""
+    cluster_name = request.form.get("cluster_name", "").strip()
+    lifetime_raw = request.form.get("extension_hours", "").strip()
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    try:
+        extension_hours, needs_approval = parse_lifetime_selection(lifetime_raw)
+    except ValueError:
+        flash("Choose a valid cluster lifetime.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    _, clusters, _ = get_lab_status()
+    try:
+        with get_db_ctx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deployment = conn.execute(
+                f"SELECT started_by, install_type FROM deployments "
+                f"WHERE cluster_name=? AND status IN ({_ACTIVE_DEPLOYMENT_SQL}) "
+                "ORDER BY id DESC LIMIT 1",
+                (cluster_name,),
+            ).fetchone()
+            reservation = conn.execute(
+                "SELECT reserved_until, reserved_by FROM cluster_reservations "
+                "WHERE cluster_name=? AND reserved_until >= datetime('now')",
+                (cluster_name,),
+            ).fetchone()
+
+            is_remote = deployment and deployment["install_type"] == "sno"
+            if not deployment or (cluster_name not in clusters and not is_remote) or not reservation:
+                conn.rollback()
+                flash(f"Cluster '{cluster_name}' is not active.", "warning")
+                return redirect(url_for("user_dashboard"))
+
+            owner = reservation["reserved_by"] or deployment["started_by"]
+            if not session.get("admin") and owner != session.get("user_email"):
+                conn.rollback()
+                flash("You can only extend clusters you created.", "danger")
+                return redirect(url_for("user_dashboard"))
+
+            if needs_approval:
+                pending = conn.execute(
+                    "SELECT id FROM cluster_extension_requests "
+                    "WHERE cluster_name=? AND status='pending' LIMIT 1",
+                    (cluster_name,),
+                ).fetchone()
+                if pending:
+                    conn.rollback()
+                    flash("An extension request for this cluster is already pending admin approval.", "warning")
+                    return redirect(url_for("user_dashboard"))
+                conn.execute(
+                    "INSERT INTO cluster_extension_requests (cluster_name, requested_by, reason) "
+                    "VALUES (?, ?, ?)",
+                    (cluster_name, session.get("user_email"), "More than a week requested from dashboard"),
+                )
+                conn.commit()
+            else:
+                updated = conn.execute(
+                    "UPDATE cluster_reservations SET reserved_until="
+                    "datetime(reserved_until, '+' || ? || ' hours') "
+                    "WHERE cluster_name=? AND reserved_until >= datetime('now')",
+                    (str(extension_hours), cluster_name),
+                )
+                if updated.rowcount != 1:
+                    conn.rollback()
+                    flash(f"Cluster '{cluster_name}' lifetime has expired.", "warning")
+                    return redirect(url_for("user_dashboard"))
+                conn.commit()
+    except sqlite3.Error:
+        app.logger.exception("Failed to extend lifecycle for %s", cluster_name)
+        flash("Could not update the cluster lifetime. Please try again.", "danger")
+        return redirect(url_for("user_dashboard"))
+
+    if needs_approval:
+        log_activity("extension_requested", f"{cluster_name} more than a week")
+        flash(f"Extension request for '{cluster_name}' was sent to an administrator.", "success")
+    else:
+        _write_reservation_file()
+        log_activity("cluster_lifecycle_extended", f"{cluster_name} +{extension_hours}h")
+        flash(f"Extended '{cluster_name}' by {extension_hours} hours.", "success")
+    return redirect(url_for("user_dashboard"))
+
+
 # --- Cluster Management ---
 
 @app.route("/cluster/kubeconfig/<cluster_name>")
@@ -1760,6 +1955,37 @@ def cluster_kubeconfig(cluster_name):
                      download_name=f"kubeconfig-{cluster_name}")
 
 
+@app.route("/cluster/credentials/<cluster_name>")
+@login_required
+def cluster_credentials(cluster_name):
+    """Return the kubeadmin console credentials for an active cluster."""
+    if not valid_cluster_name(cluster_name):
+        abort(400)
+
+    _, clusters, _ = get_lab_status()
+    if cluster_name not in clusters:
+        return jsonify(error="Cluster is not active"), 404
+
+    password_path = _find_cluster_auth_file(cluster_name, "kubeadmin-password")
+    if not password_path:
+        return jsonify(error="Cluster credentials are not available yet"), 404
+
+    try:
+        with open(password_path, "r", encoding="utf-8") as password_file:
+            password = password_file.read().strip()
+    except OSError:
+        return jsonify(error="Cluster credentials could not be read"), 503
+
+    if not password:
+        return jsonify(error="Cluster credentials are not available yet"), 404
+
+    log_activity("console_credentials_view", cluster_name)
+    response = jsonify(username="kubeadmin", password=password)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.route("/cluster/create", methods=["POST"])
 @login_required
 def cluster_create():
@@ -1775,7 +2001,7 @@ def cluster_create():
         return redirect(url_for("user_dashboard"))
 
     if not valid_ocp_version(ocp_version):
-        flash("OCP version must look like X.Y.Z or X.Y.Z-pre (e.g. 4.19.22 or 5.0.0-rc.2).", "danger")
+        flash("OCP version must look like X.Y.Z or X.Y.Z-pre (e.g. 4.19.22 or 5.0.0-rc.4).", "danger")
         return redirect(url_for("user_dashboard"))
 
     release = config.OCP_RELEASES.get(ocp_release)
@@ -1786,17 +2012,11 @@ def cluster_create():
         flash(f"{release['label']} is pinned to OCP {release['version']}.", "danger")
         return redirect(url_for("user_dashboard"))
 
-    needs_extension = reservation_hours_raw == "extend"
-    if needs_extension:
-        reservation_hours = 168
-    else:
-        try:
-            reservation_hours = int(reservation_hours_raw)
-            if reservation_hours < 3 or reservation_hours > 168:
-                raise ValueError
-        except (ValueError, TypeError):
-            flash("Cluster lifetime is required (3 hours to 1 week).", "danger")
-            return redirect(url_for("user_dashboard"))
+    try:
+        reservation_hours, needs_extension = parse_lifetime_selection(reservation_hours_raw)
+    except ValueError:
+        flash("Cluster lifetime is required (3 hours to 1 week).", "danger")
+        return redirect(url_for("user_dashboard"))
 
     if install_type not in config.INSTALL_TYPES:
         flash(f"Invalid install type '{install_type}'.", "danger")
@@ -2372,10 +2592,11 @@ def _launch_deployment_job(row):
 
 
 def _start_queued_deployments():
-    """Start the first FIFO job that is safe to admit.
+    """Start every queued job that fits the current resource budget.
 
-    A blocked head request holds the queue.  This keeps the user-visible
-    position meaningful and prevents later requests from overtaking it.
+    A request blocked by resources or the temporary legacy IPI bootstrap gate
+    is skipped so an independent UPI request can still make progress. The
+    transactional claim repeats the resource check inside SQLite.
     """
     queue_status = sql_statuses((QUEUED_STATUS,))
     with get_db_ctx() as conn:
@@ -2385,22 +2606,24 @@ def _start_queued_deployments():
         ).fetchall()
 
     for row in queued:
-        # The current lab has one shared provisioning/Ironic plane.  A
-        # completed IPI cluster still occupies that capacity until its
-        # reservation is cleaned up, so later IPI requests remain queued.
         if row["install_type"] == "ipi":
             ok, _ = _check_ipi_capacity(row["id"])
             if not ok:
-                return
+                continue
 
         ok, _ = _check_resources(row["install_type"])
         if not ok:
-            return
+            continue
+        capacity = _resource_capacity_snapshot()
         with get_db_ctx() as conn:
-            claimed = claim_job(conn, row["id"], DEPLOYMENT_WORKER_ID)
+            claimed = claim_job(
+                conn,
+                row["id"],
+                DEPLOYMENT_WORKER_ID,
+                capacity=(capacity["max_cpus"], capacity["max_ram"]),
+            )
         if claimed:
             _launch_deployment_job(claimed)
-            return
 
 
 def _deployment_scheduler():
